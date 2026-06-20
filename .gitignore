@@ -15,3 +15,6 @@ bower_components
 psd
 thumb
 sketch
+
+tracer.db
+.env
