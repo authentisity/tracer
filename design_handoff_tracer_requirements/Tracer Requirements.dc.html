@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    ::selection { background: #f3d7af; }
+    input::placeholder { color: #b3ab9c; }
+    /* thin scrollbars for the technical feel */
+    *::-webkit-scrollbar { width: 9px; height: 9px; }
+    *::-webkit-scrollbar-thumb { background: #d8d2c6; border-radius: 6px; }
+    *::-webkit-scrollbar-track { background: transparent; }
+  </style>
+</helmet>
+
+<div style="height:100vh; display:flex; flex-direction:column; background:#f4f2ee; color:#1c1a16; font-family:'Inter',system-ui,sans-serif; overflow:hidden;">
+
+  <header style="flex:none; display:flex; align-items:center; gap:18px; padding:0 22px; height:56px; background:#fff; border-bottom:1px solid #e4e0d8;">
+    <div style="display:flex; align-items:center; gap:10px;">
+      <div style="width:23px; height:23px; border-radius:6px; background:#1c1a16; display:flex; align-items:center; justify-content:center; color:#fff; font-family:'IBM Plex Mono',monospace; font-size:13px; font-weight:600;">T</div>
+      <span style="font-family:'IBM Plex Mono',monospace; font-size:13px; letter-spacing:0.2em; font-weight:600; color:#1c1a16;">TRACER</span>
+      <span style="font-family:'IBM Plex Mono',monospace; font-size:10px; color:#98917f; border:1px solid #e4e0d8; border-radius:5px; padding:2px 6px;">v0.4</span>
+    </div>
+    <div style="width:1px; height:24px; background:#e4e0d8;"></div>
+    <div style="display:flex; align-items:center; gap:10px;">
+      <span style="font-size:9.5px; letter-spacing:0.14em; color:#a39b8c; font-family:'IBM Plex Mono',monospace;">PROJECT</span>
+      <span style="font-family:'IBM Plex Mono',monospace; font-size:13px; color:#1c1a16; font-weight:600;">rev-c-power-mux</span>
+      <span style="font-family:'IBM Plex Mono',monospace; font-size:9.5px; letter-spacing:0.06em; color:#7d7768; border:1px solid #e4e0d8; border-radius:5px; padding:2px 6px;">REV C</span>
+    </div>
+    <div style="display:flex; align-items:center; gap:7px; padding:4px 10px; background:#fdf4e6; border:1px solid #f0dcb5; border-radius:20px;">
+      <div style="width:6px; height:6px; border-radius:50%; background:#c2620e;"></div>
+      <span style="font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:#9a4d09;">analyzing</span>
+    </div>
+    <div style="flex:1;"></div>
+    <button onClick="{{ onCopy }}" style="font-family:'IBM Plex Mono',monospace; font-size:11.5px; color:#46423a; background:#fff; border:1px solid #ddd7cc; border-radius:7px; padding:8px 13px; cursor:pointer;" style-hover="background:#f7f4ef; border-color:#cfc8bb;">{{ exportLabel }}</button>
+    <button onClick="{{ onFormalize }}" style="font-family:'Inter',sans-serif; font-size:12.5px; font-weight:600; color:#fff; background:#c2620e; border:1px solid #ad560c; border-radius:7px; padding:8px 15px; cursor:pointer;" style-hover="background:#ad560c;">Formalize spec →</button>
+  </header>
+
+  <div style="flex:none; display:flex; align-items:center; gap:18px; padding:11px 22px; background:#faf8f3; border-bottom:1px solid #e4e0d8;">
+    <sc-for list="{{ stages }}" as="stage" hint-placeholder-count="4">
+      <div style="display:flex; align-items:center; gap:18px;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <div style="{{ stage.dotStyle }}">{{ stage.mark }}</div>
+          <div style="display:flex; flex-direction:column; line-height:1.3;">
+            <span style="font-size:8.5px; letter-spacing:0.14em; color:#b0a895; font-family:'IBM Plex Mono',monospace;">{{ stage.num }}</span>
+            <span style="{{ stage.labelStyle }}">{{ stage.label }}</span>
+          </div>
+        </div>
+        <sc-if value="{{ stage.notLast }}" hint-placeholder-val="{{ true }}">
+          <span style="color:#cfc9bd; font-size:14px;">→</span>
+        </sc-if>
+      </div>
+    </sc-for>
+  </div>
+
+  <div style="flex:1; display:grid; grid-template-columns:280px minmax(0,1fr) 360px; min-height:0; overflow:hidden;">
+
+    <aside style="overflow:auto; background:#fbfaf6; border-right:1px solid #e4e0d8; padding:18px 18px 30px;">
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:9px;">
+        <span style="font-family:'IBM Plex Mono',monospace; font-size:10px; letter-spacing:0.12em; color:#9a4d09; background:#fbeed8; border:1px solid #f0dcb5; border-radius:4px; padding:2px 6px;">INPUT</span>
+        <span style="font-size:11px; color:#a39b8c;">plain language</span>
+      </div>
+      <div style="background:#fff; border:1px solid #e6e2da; border-radius:8px; padding:13px 14px; font-family:'IBM Plex Mono',monospace; font-size:12px; line-height:1.65; color:#46423a;">Small USB-C powered mux board. 9–36&nbsp;V input, needs 5&nbsp;V at 3&nbsp;A out. Talks I²C to a host controller. Must fit a 50&nbsp;×&nbsp;35&nbsp;mm enclosure and run up to 70&nbsp;°C ambient.</div>
+
+      <div style="height:1px; background:#e9e5dd; margin:20px 0;"></div>
+
+      <div style="font-family:'IBM Plex Mono',monospace; font-size:10px; letter-spacing:0.12em; color:#8a8473; margin-bottom:12px;">INTENT ANALYSIS</div>
+      <div style="display:flex; flex-direction:column; gap:9px;">
+        <div style="display:flex; align-items:baseline; justify-content:space-between;">
+          <span style="font-size:12.5px; color:#6b665c;">Requirements extracted</span>
+          <span style="font-family:'IBM Plex Mono',monospace; font-size:15px; font-weight:600; color:#1c1a16;">{{ total }}</span>
+        </div>
+        <div style="display:flex; align-items:baseline; justify-content:space-between;">
+          <span style="font-size:12.5px; color:#6b665c;">Stated</span>
+          <span style="font-family:'IBM Plex Mono',monospace; font-size:14px; font-weight:600; color:#3f7d57;">{{ statedCount }}</span>
+        </div>
+        <div style="display:flex; align-items:baseline; justify-content:space-between;">
+          <span style="font-size:12.5px; color:#6b665c;">Inferred</span>
+          <span style="font-family:'IBM Plex Mono',monospace; font-size:14px; font-weight:600; color:#c2620e;">{{ inferredCount }}</span>
+        </div>
+      </div>
+      <div style="margin-top:14px;">
+        <div style="display:flex; align-items:baseline; justify-content:space-between; margin-bottom:6px;">
+          <span style="font-size:11px; color:#a39b8c; font-family:'IBM Plex Mono',monospace;">OVERALL CONFIDENCE</span>
+          <span style="font-family:'IBM Plex Mono',monospace; font-size:12px; font-weight:600; color:#46423a;">{{ overallPct }}</span>
+        </div>
+        <div style="height:6px; background:#ece8e0; border-radius:3px; overflow:hidden;"><div style="{{ overallBar }}"></div></div>
+      </div>
+
+      <div style="height:1px; background:#e9e5dd; margin:20px 0;"></div>
+
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">
+        <span style="font-family:'IBM Plex Mono',monospace; font-size:10px; letter-spacing:0.12em; color:#8a8473;">INFERRED ASSUMPTIONS</span>
+        <span style="font-family:'IBM Plex Mono',monospace; font-size:10px; color:#b3ab9c;">{{ inferredCount }}</span>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:13px;">
+        <div style="display:flex; gap:9px;">
+          <div style="width:6px; height:6px; border-radius:50%; background:#c2620e; flex:none; margin-top:5px;"></div>
+          <div><span style="font-size:12px; color:#46423a; line-height:1.5;">3.3&nbsp;V logic rail assumed from I²C bus and MCU presence.</span> <span style="font-family:'IBM Plex Mono',monospace; font-size:10px; color:#b3ab9c;">→ PWR-03</span></div>
+        </div>
+        <div style="display:flex; gap:9px;">
+          <div style="width:6px; height:6px; border-radius:50%; background:#c2620e; flex:none; margin-top:5px;"></div>
+          <div><span style="font-size:12px; color:#46423a; line-height:1.5;">Reverse-polarity FET added for wide 9–36&nbsp;V input.</span> <span style="font-family:'IBM Plex Mono',monospace; font-size:10px; color:#b3ab9c;">→ PWR-04</span></div>
+        </div>
+        <div style="display:flex; gap:9px;">
+          <div style="width:6px; height:6px; border-radius:50%; background:#c2620e; flex:none; margin-top:5px;"></div>
+          <div><span style="font-size:12px; color:#46423a; line-height:1.5;">USB 2.0 full-speed — no high-speed cue in the brief.</span> <span style="font-family:'IBM Plex Mono',monospace; font-size:10px; color:#b3ab9c;">→ IF-01</span></div>
+        </div>
+        <div style="display:flex; gap:9px;">
+          <div style="width:6px; height:6px; border-radius:50%; background:#c2620e; flex:none; margin-top:5px;"></div>
+          <div><span style="font-size:12px; color:#46423a; line-height:1.5;">Enclosure fit implies 4&nbsp;×&nbsp;M2.5 mounting holes.</span> <span style="font-family:'IBM Plex Mono',monospace; font-size:10px; color:#b3ab9c;">→ MEC-02</span></div>
+        </div>
+        <div style="display:flex; gap:9px;">
+          <div style="width:6px; height:6px; border-radius:50%; background:#c2620e; flex:none; margin-top:5px;"></div>
+          <div><span style="font-size:12px; color:#46423a; line-height:1.5;">Edge-mounted USB-C for connector access through the case.</span> <span style="font-family:'IBM Plex Mono',monospace; font-size:10px; color:#b3ab9c;">→ PLC-01</span></div>
+        </div>
+      </div>
+    </aside>
+
+    <main style="overflow:auto; padding:18px 22px 44px;">
+      <div style="display:flex; align-items:flex-end; justify-content:space-between; gap:12px 16px; flex-wrap:wrap; margin-bottom:14px;">
+        <div>
+          <div style="font-size:16px; font-weight:600; color:#1c1a16; letter-spacing:-0.01em;">Structured requirements</div>
+          <div style="font-family:'IBM Plex Mono',monospace; font-size:11px; color:#a39b8c; margin-top:3px;">{{ summarySub }}</div>
+        </div>
+        <div style="display:flex; gap:6px;">
+          <sc-for list="{{ filters }}" as="f" hint-placeholder-count="3">
+            <button data-key="{{ f.key }}" onClick="{{ onSetFilter }}" style="{{ f.style }}">{{ f.text }}</button>
+          </sc-for>
+        </div>
+      </div>
+
+      <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:20px;">
+        <sc-for list="{{ cats }}" as="c" hint-placeholder-count="8">
+          <button data-key="{{ c.key }}" onClick="{{ onSetCat }}" style="{{ c.style }}">{{ c.text }}</button>
+        </sc-for>
+      </div>
+
+      <sc-for list="{{ groups }}" as="group" hint-placeholder-count="4">
+        <section style="margin-bottom:24px;">
+          <div style="display:flex; align-items:center; gap:10px; margin:0 0 11px;">
+            <span style="font-family:'IBM Plex Mono',monospace; font-size:11px; letter-spacing:0.13em; color:#8a8473; text-transform:uppercase;">{{ group.label }}</span>
+            <span style="font-family:'IBM Plex Mono',monospace; font-size:10px; color:#b3ab9c;">{{ group.count }}</span>
+            <div style="flex:1; height:1px; background:#e9e5dd;"></div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:8px;">
+            <sc-for list="{{ group.items }}" as="req" hint-placeholder-count="3">
+              <div style="display:flex; gap:13px; background:#fff; border:1px solid #e6e2da; border-radius:8px; padding:13px 15px;" style-hover="border-color:#d4cdbf;">
+                <div style="{{ req.stripStyle }}"></div>
+                <div style="flex:1; min-width:0;">
+                  <div style="display:flex; align-items:center; gap:9px;">
+                    <span style="font-family:'IBM Plex Mono',monospace; font-size:11px; color:#8a8473; font-weight:500;">{{ req.id }}</span>
+                    <button data-id="{{ req.id }}" onClick="{{ onToggleKind }}" title="Toggle stated / inferred" style="{{ req.badgeStyle }}">{{ req.kindLabel }}</button>
+                    <div style="flex:1;"></div>
+                    <sc-if value="{{ showConfidence }}" hint-placeholder-val="{{ true }}">
+                      <div style="display:flex; align-items:center; gap:7px;">
+                        <span style="font-family:'IBM Plex Mono',monospace; font-size:9.5px; letter-spacing:0.06em; color:#b0a895;">CONF</span>
+                        <div style="width:56px; height:5px; background:#ece8e0; border-radius:3px; overflow:hidden;"><div style="{{ req.barStyle }}"></div></div>
+                        <span style="font-family:'IBM Plex Mono',monospace; font-size:11px; color:#6b665c; width:30px; text-align:right;">{{ req.confPct }}</span>
+                      </div>
+                    </sc-if>
+                  </div>
+                  <div style="font-size:13px; color:#5a5448; margin:7px 0 1px;">{{ req.title }}</div>
+                  <input value="{{ req.value }}" data-id="{{ req.id }}" onChange="{{ onEditValue }}" style="width:100%; border:none; border-bottom:1px solid transparent; background:transparent; font-family:'IBM Plex Mono',monospace; font-size:13.5px; color:#1c1a16; font-weight:500; padding:3px 0; outline:none;" style-focus="border-bottom-color:#c2620e;" style-hover="border-bottom-color:#e0dbd1;" />
+                </div>
+              </div>
+            </sc-for>
+          </div>
+        </section>
+      </sc-for>
+    </main>
+
+    <aside style="overflow:hidden; background:#fbfaf6; border-left:1px solid #e4e0d8; display:flex; flex-direction:column;">
+      <div style="flex:none; padding:16px 16px 12px; display:flex; align-items:center; gap:8px;">
+        <span style="font-family:'IBM Plex Mono',monospace; font-size:10px; letter-spacing:0.12em; color:#8a8473;">FORMAL SPECIFICATION</span>
+        <div style="flex:1;"></div>
+        <span style="font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:#1c1a16; background:#fff; border:1px solid #ddd7cc; border-radius:5px; padding:3px 9px;">JSON</span>
+      </div>
+      <div style="flex:1; margin:0 16px; min-height:0; background:#1b1916; border-radius:9px; display:flex; flex-direction:column; overflow:hidden;">
+        <div style="flex:none; display:flex; align-items:center; gap:8px; padding:9px 12px; border-bottom:1px solid #2c2924;">
+          <div style="width:9px; height:9px; border-radius:50%; background:#c2620e;"></div>
+          <span style="font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:#8c857a;">rev-c-power-mux.req.json</span>
+          <div style="flex:1;"></div>
+          <button onClick="{{ onCopy }}" style="font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:#c9c2b5; background:#2a2722; border:1px solid #3a362f; border-radius:5px; padding:4px 9px; cursor:pointer;" style-hover="background:#34302a;">{{ copyLabel }}</button>
+        </div>
+        <pre style="margin:0; flex:1; overflow:auto; padding:13px 15px; font-family:'IBM Plex Mono',monospace; font-size:11.5px; line-height:1.6; color:#cfc8b9; white-space:pre;">{{ jsonText }}</pre>
+      </div>
+      <div style="flex:none; padding:13px 16px 16px; display:flex; align-items:center; gap:9px;">
+        <div style="width:6px; height:6px; border-radius:50%; background:#c2620e; flex:none;"></div>
+        <span style="font-size:11px; color:#8a8473; line-height:1.4;">{{ footerNote }}</span>
+      </div>
+    </aside>
+
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{
+  &quot;showConfidence&quot;: { &quot;editor&quot;: &quot;boolean&quot;, &quot;default&quot;: true, &quot;tsType&quot;: &quot;boolean&quot; },
+  &quot;highlightInferred&quot;: { &quot;editor&quot;: &quot;boolean&quot;, &quot;default&quot;: true, &quot;tsType&quot;: &quot;boolean&quot; },
+  &quot;sortMode&quot;: { &quot;editor&quot;: &quot;enum&quot;, &quot;options&quot;: [&quot;category&quot;, &quot;confidence&quot;, &quot;origin&quot;], &quot;default&quot;: &quot;category&quot;, &quot;tsType&quot;: &quot;string&quot; }
+}">
+class Component extends DCLogic {
+  state = {
+    filter: 'all',
+    category: 'all',
+    stage: 3,
+    copied: false,
+    requirements: [
+      { id:'PWR-01', cat:'power', title:'Input voltage range', value:'9 – 36 V DC', kind:'stated', conf:0.98 },
+      { id:'PWR-02', cat:'power', title:'Primary output rail', value:'5.0 V @ 3.0 A', kind:'stated', conf:0.97 },
+      { id:'PWR-03', cat:'power', title:'Logic rail', value:'3.3 V @ 1.5 A', kind:'inferred', conf:0.74 },
+      { id:'PWR-04', cat:'power', title:'Reverse-polarity protection', value:'Required · P-FET', kind:'inferred', conf:0.69 },
+      { id:'PWR-05', cat:'power', title:'Quiescent current', value:'< 50 µA', kind:'inferred', conf:0.58 },
+      { id:'IF-01', cat:'interfaces', title:'Host link', value:'USB-C · USB 2.0 FS', kind:'stated', conf:0.95 },
+      { id:'IF-02', cat:'interfaces', title:'Control bus', value:'I²C @ 400 kHz', kind:'stated', conf:0.96 },
+      { id:'IF-03', cat:'interfaces', title:'Debug port', value:'SWD · 10-pin 1.27 mm', kind:'inferred', conf:0.71 },
+      { id:'CMP-01', cat:'components', title:'Buck converter', value:'Sync · ≥ 90% eff', kind:'inferred', conf:0.66 },
+      { id:'CMP-02', cat:'components', title:'Microcontroller', value:'Cortex-M0+ class', kind:'inferred', conf:0.62 },
+      { id:'SI-01', cat:'signal', title:'USB differential impedance', value:'90 Ω ± 10%', kind:'inferred', conf:0.78 },
+      { id:'SI-02', cat:'signal', title:'I²C pull-ups', value:'2.2 kΩ to 3V3', kind:'inferred', conf:0.64 },
+      { id:'TH-01', cat:'thermal', title:'Max ambient', value:'70 °C', kind:'stated', conf:0.94 },
+      { id:'TH-02', cat:'thermal', title:'Junction margin', value:'≥ 20 °C', kind:'inferred', conf:0.60 },
+      { id:'MEC-01', cat:'mechanical', title:'Board outline', value:'50 × 35 mm', kind:'stated', conf:0.99 },
+      { id:'MEC-02', cat:'mechanical', title:'Mounting', value:'4 × M2.5', kind:'inferred', conf:0.67 },
+      { id:'PLC-01', cat:'placement', title:'USB-C connector', value:'Board edge · south', kind:'inferred', conf:0.63 },
+      { id:'PLC-02', cat:'placement', title:'Connectors', value:'Top side only', kind:'inferred', conf:0.61 },
+    ],
+  };
+
+  updateById(id, patch) {
+    this.setState(s => ({ requirements: s.requirements.map(r => r.id === id ? { ...r, ...patch } : r) }));
+  }
+
+  renderVals() {
+    const CAT = { power:'Power', interfaces:'Interfaces', components:'Components', signal:'Signal Integrity', thermal:'Thermal', mechanical:'Mechanical', placement:'Placement' };
+    const order = ['power','interfaces','components','signal','thermal','mechanical','placement'];
+    const reqs = this.state.requirements;
+    const filter = this.state.filter;
+    const cat = this.state.category;
+
+    const sortMode = this.props.sortMode ?? 'category';
+    const showConfidence = this.props.showConfidence ?? true;
+    const highlightInferred = this.props.highlightInferred ?? true;
+
+    const total = reqs.length;
+    const statedCount = reqs.filter(r => r.kind === 'stated').length;
+    const inferredCount = total - statedCount;
+    const avg = reqs.reduce((a, r) => a + r.conf, 0) / total;
+    const overallPct = Math.round(avg * 100) + '%';
+
+    const decorate = (r) => {
+      const inf = r.kind === 'inferred';
+      const amber = inf && highlightInferred;
+      const badgeBase = { fontFamily:"'IBM Plex Mono',monospace", fontSize:'9.5px', letterSpacing:'0.08em', fontWeight:500, padding:'3px 7px', borderRadius:'4px', cursor:'pointer', whiteSpace:'nowrap' };
+      const badge = amber
+        ? { ...badgeBase, color:'#9a4d09', background:'#fbeed8', border:'1px solid #f0dcb5' }
+        : inf
+          ? { ...badgeBase, color:'#6b665c', background:'#efece6', border:'1px solid #e0dbd1' }
+          : { ...badgeBase, color:'#3f6b50', background:'#e7efe7', border:'1px solid #cfe0d2' };
+      const barColor = r.conf >= 0.85 ? '#3f7d57' : (r.conf >= 0.7 ? '#c2620e' : '#cf9134');
+      return {
+        ...r,
+        kindLabel: inf ? 'INFERRED' : 'STATED',
+        confPct: Math.round(r.conf * 100) + '%',
+        stripStyle: { width:'3px', alignSelf:'stretch', borderRadius:'3px', flex:'none', background: amber ? '#c2620e' : (inf ? '#d3ccbf' : '#9bbf9f') },
+        badgeStyle: badge,
+        barStyle: { width: Math.round(r.conf * 100) + '%', height:'100%', borderRadius:'3px', background: barColor },
+      };
+    };
+
+    let groups;
+    if (sortMode === 'category') {
+      groups = order
+        .map(k => ({ key:k, label:CAT[k], items: reqs.filter(r => r.cat === k && (filter === 'all' || r.kind === filter) && (cat === 'all' || r.cat === cat)) }))
+        .filter(g => g.items.length)
+        .map(g => ({ ...g, count: g.items.length, items: g.items.map(decorate) }));
+    } else {
+      let list = reqs.filter(r => (filter === 'all' || r.kind === filter) && (cat === 'all' || r.cat === cat));
+      if (sortMode === 'confidence') list = [...list].sort((a, b) => b.conf - a.conf);
+      if (sortMode === 'origin') list = [...list].sort((a, b) => (a.kind === b.kind ? b.conf - a.conf : a.kind === 'inferred' ? -1 : 1));
+      groups = [{ key:'all', label: sortMode === 'confidence' ? 'Sorted by confidence' : 'Sorted by origin', count: list.length, items: list.map(decorate) }];
+    }
+
+    const chipBase = { fontFamily:"'IBM Plex Mono',monospace", fontSize:'11px', letterSpacing:'0.03em', padding:'5px 11px', borderRadius:'7px', cursor:'pointer', whiteSpace:'nowrap', fontWeight:500 };
+    const chip = (active) => active
+      ? { ...chipBase, background:'#1c1a16', color:'#fff', border:'1px solid #1c1a16' }
+      : { ...chipBase, background:'#fff', color:'#5a5448', border:'1px solid #e0dbd1' };
+
+    const filters = [
+      { key:'all', text:'All ' + total },
+      { key:'stated', text:'Stated ' + statedCount },
+      { key:'inferred', text:'Inferred ' + inferredCount },
+    ].map(f => ({ ...f, style: chip(f.key === filter) }));
+
+    const cats = [{ key:'all', label:'All', count: total }]
+      .concat(order.map(k => ({ key:k, label:CAT[k], count: reqs.filter(r => r.cat === k).length })))
+      .map(c => ({ key:c.key, text:c.label + '  ' + c.count, style: chip(c.key === cat) }));
+
+    const names = ['Describe board','Intent analysis','Structured requirements','Formal specification'];
+    const stage = this.state.stage;
+    const stages = names.map((label, i) => {
+      const n = i + 1;
+      const done = n < stage, active = n === stage;
+      return {
+        label,
+        num: 'STAGE ' + String(n).padStart(2, '0'),
+        mark: done ? '✓' : String(n),
+        notLast: i < names.length - 1,
+        dotStyle: {
+          width:'22px', height:'22px', borderRadius:'50%', display:'flex', alignItems:'center', justifyContent:'center',
+          fontFamily:"'IBM Plex Mono',monospace", fontSize:'11px', fontWeight:600, flex:'none',
+          ...(done ? { background:'#c2620e', color:'#fff' } : active ? { background:'#fff', color:'#c2620e', border:'2px solid #c2620e' } : { background:'#fff', color:'#b3ab9c', border:'1px solid #d6d1c7' }),
+        },
+        labelStyle: { fontSize:'12.5px', fontWeight: active ? 600 : 500, color: (done || active) ? '#1c1a16' : '#a39b8c' },
+      };
+    });
+
+    const obj = {
+      project: 'rev-c-power-mux',
+      revision: 'C',
+      generated: '2026-06-20',
+      summary: { total, stated: statedCount, inferred: inferredCount, confidence: Number(avg.toFixed(2)) },
+      requirements: {},
+    };
+    order.forEach(k => {
+      const items = reqs.filter(r => r.cat === k);
+      if (items.length) obj.requirements[k] = items.map(r => ({ id:r.id, title:r.title, value:r.value, origin:r.kind, confidence:Number(r.conf.toFixed(2)) }));
+    });
+    const jsonText = JSON.stringify(obj, null, 2);
+
+    return {
+      total, statedCount, inferredCount, overallPct,
+      overallBar: { width: overallPct, height:'100%', borderRadius:'3px', background:'#c2620e' },
+      summarySub: total + ' extracted · ' + statedCount + ' stated · ' + inferredCount + ' inferred',
+      filters, cats, groups, stages, jsonText,
+      showConfidence,
+      exportLabel: this.state.copied ? 'Copied ✓' : 'Export JSON',
+      copyLabel: this.state.copied ? 'copied ✓' : 'copy',
+      footerNote: this.state.stage >= 4 ? 'Specification formalized · ready for export' : 'Regenerated live from current requirements',
+      onSetFilter: (e) => this.setState({ filter: e.currentTarget.dataset.key }),
+      onSetCat: (e) => this.setState({ category: e.currentTarget.dataset.key }),
+      onEditValue: (e) => this.updateById(e.target.dataset.id, { value: e.target.value }),
+      onToggleKind: (e) => {
+        const id = e.currentTarget.dataset.id;
+        const r = this.state.requirements.find(x => x.id === id);
+        if (!r) return;
+        const toStated = r.kind === 'inferred';
+        this.updateById(id, { kind: toStated ? 'stated' : 'inferred', conf: toStated ? Math.min(0.99, r.conf + 0.2) : Math.max(0.5, r.conf - 0.2) });
+      },
+      onFormalize: () => this.setState({ stage: 4 }),
+      onCopy: () => {
+        try { navigator.clipboard && navigator.clipboard.writeText(jsonText); } catch (_) {}
+        this.setState({ copied: true });
+        clearTimeout(this._ct);
+        this._ct = setTimeout(() => this.setState({ copied: false }), 1600);
+      },
+    };
+  }
+}
+</script>
+</body>
+</html>
