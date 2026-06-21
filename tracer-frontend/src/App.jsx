@@ -689,9 +689,100 @@ function parseBomCsv(text) {
   return { components, nets: [], parameters: {} }
 }
 
+// ── KiCad netlist (S-expression) import ──────────────────────────────────────
+function tokenizeSexpr(text) {
+  const tokens = []
+  let i = 0
+  while (i < text.length) {
+    const ch = text[i]
+    if (ch === '(' || ch === ')') {
+      tokens.push(ch)
+      i++
+    } else if (ch === '"') {
+      i++
+      let s = ''
+      while (i < text.length && text[i] !== '"') {
+        if (text[i] === '\\' && i + 1 < text.length) i++
+        s += text[i]
+        i++
+      }
+      i++
+      tokens.push({ s })
+    } else if (/\s/.test(ch)) {
+      i++
+    } else {
+      let a = ''
+      while (i < text.length && !/[\s()"]/.test(text[i])) {
+        a += text[i]
+        i++
+      }
+      tokens.push({ a })
+    }
+  }
+  return tokens
+}
+
+function sexprTree(tokens) {
+  let i = 0
+  function build() {
+    const arr = []
+    while (i < tokens.length) {
+      const t = tokens[i++]
+      if (t === '(') arr.push(build())
+      else if (t === ')') return arr
+      else arr.push(t)
+    }
+    return arr
+  }
+  while (i < tokens.length && tokens[i] !== '(') i++
+  if (i >= tokens.length) return null
+  i++
+  return build()
+}
+
+// Parse a standard KiCad netlist export into the artifact shape.
+function parseKicadNetlist(text) {
+  const tree = sexprTree(tokenizeSexpr(text))
+  if (!tree || tree[0]?.a !== 'export') return null
+  const head = (node, name) => node.find((x) => Array.isArray(x) && x[0]?.a === name)
+  const val = (node, key) => {
+    const v = head(node, key)?.[1]
+    return v?.s ?? v?.a ?? ''
+  }
+  const compsNode = head(tree, 'components')
+  const netsNode = head(tree, 'nets')
+
+  const components = []
+  for (const comp of compsNode?.filter((x) => Array.isArray(x) && x[0]?.a === 'comp') ?? []) {
+    const ref = val(comp, 'ref')
+    const value = val(comp, 'value')
+    if (!ref) continue
+    const c = { ref, part: value }
+    if (value) c.values = { value }
+    components.push(c)
+  }
+
+  const nets = []
+  for (const net of netsNode?.filter((x) => Array.isArray(x) && x[0]?.a === 'net') ?? []) {
+    const name = val(net, 'name')
+    const pins = []
+    for (const node of net.filter((x) => Array.isArray(x) && x[0]?.a === 'node')) {
+      const ref = val(node, 'ref')
+      const pin = val(node, 'pin')
+      if (ref) pins.push(pin ? `${ref}.${pin}` : ref)
+    }
+    if (name) nets.push({ name, pins })
+  }
+
+  if (!components.length && !nets.length) return null
+  return { components, nets, parameters: {} }
+}
+
 function ArtifactInput({ value, onChange, candidate }) {
   const [csv, setCsv] = useState('')
   const [bomError, setBomError] = useState(null)
+  const [netlist, setNetlist] = useState('')
+  const [netError, setNetError] = useState(null)
 
   function importBom() {
     const parsed = parseBomCsv(csv)
@@ -700,6 +791,16 @@ function ArtifactInput({ value, onChange, candidate }) {
       return
     }
     setBomError(null)
+    onChange(JSON.stringify(parsed, null, 2))
+  }
+
+  function importKicad() {
+    const parsed = parseKicadNetlist(netlist)
+    if (!parsed) {
+      setNetError('Could not parse — expecting a standard KiCad netlist (an (export …) S-expression).')
+      return
+    }
+    setNetError(null)
     onChange(JSON.stringify(parsed, null, 2))
   }
 
@@ -763,6 +864,25 @@ function ArtifactInput({ value, onChange, candidate }) {
           Convert to artifact
         </button>
         {bomError && <p className="check-flagged">{bomError}</p>}
+      </details>
+      <details className="bom-import">
+        <summary>Import a KiCad netlist (.net)</summary>
+        <p className="artifact-hint">
+          Paste a standard KiCad netlist export (an <code>(export …)</code> S-expression).
+          Components and nets are extracted.
+        </p>
+        <textarea
+          className="edit-textarea mono"
+          value={netlist}
+          onChange={(e) => setNetlist(e.target.value)}
+          rows={5}
+          spellCheck={false}
+          placeholder={'(export (version "E")\n  (components (comp (ref "U1") (value "ESP32-C3")))\n  (nets (net (name "3V3") (node (ref "U1") (pin "1")))))'}
+        />
+        <button type="button" className="artifact-fill" onClick={importKicad}>
+          Convert to artifact
+        </button>
+        {netError && <p className="check-flagged">{netError}</p>}
       </details>
     </div>
   )
