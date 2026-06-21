@@ -21,6 +21,10 @@ from pipeline import (
     run_formal_requirements,
     run_validation,
     run_remediation,
+    run_stage4_component_selection,
+    run_stage5_netlist,
+    run_stage6_placement,
+    _ErcFailure,
 )
 from schemas import (
     CreateProjectRequest,
@@ -225,6 +229,137 @@ def run_remediation_endpoint(project_id: int):
         raise HTTPException(status_code=500, detail=str(exc))
 
     upsert_stage(project_id, "remediation", "complete",
+                 input_data=input_data, output_data=output)
+    return RunStageResponse(stage_id=stage_id, output=output)
+
+
+@app.post("/projects/{project_id}/stage/component_selection", response_model=RunStageResponse)
+def run_component_selection_endpoint(project_id: int):
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    stages_by_type = {s["stage_type"]: s for s in get_stages_for_project(project_id)}
+    formal_stage = stages_by_type.get("formal_requirements")
+
+    if not formal_stage or formal_stage["status"] != "complete":
+        raise HTTPException(status_code=400, detail="Complete formal_requirements stage first")
+
+    formal_requirements = formal_stage["output_json"]
+    input_data = {
+        "intent": project["intent"],
+        "formal_requirements": formal_requirements,
+    }
+    stage_id = upsert_stage(project_id, "component_selection", "running", input_data=input_data)
+
+    try:
+        output = run_stage4_component_selection(formal_requirements)
+    except Exception as exc:
+        upsert_stage(project_id, "component_selection", "failed",
+                     input_data=input_data, error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    upsert_stage(project_id, "component_selection", "complete",
+                 input_data=input_data, output_data=output)
+    return RunStageResponse(stage_id=stage_id, output=output)
+
+
+@app.post("/projects/{project_id}/stage/netlist", response_model=RunStageResponse)
+def run_netlist_endpoint(project_id: int):
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    stages_by_type = {s["stage_type"]: s for s in get_stages_for_project(project_id)}
+    comp_stage = stages_by_type.get("component_selection")
+    formal_stage = stages_by_type.get("formal_requirements")
+
+    if not formal_stage or formal_stage["status"] != "complete":
+        raise HTTPException(status_code=400, detail="Complete formal_requirements stage first")
+    if not comp_stage or comp_stage["status"] != "complete":
+        raise HTTPException(status_code=400, detail="Complete component_selection stage first")
+
+    component_selection = comp_stage["output_json"]
+    formal_requirements = formal_stage["output_json"]
+    input_data = {
+        "intent": project["intent"],
+        "component_selection": component_selection,
+        "formal_requirements": formal_requirements,
+    }
+    stage_id = upsert_stage(project_id, "netlist", "running", input_data=input_data)
+
+    try:
+        output = run_stage5_netlist(component_selection, formal_requirements)
+    except _ErcFailure as exc:
+        # ERC violations are structured output — persist them and return 422 so the
+        # client can display the rule failures rather than a generic 500.
+        upsert_stage(
+            project_id, "netlist", "failed",
+            input_data=input_data,
+            output_data=exc.partial_output,
+            error=str(exc),
+        )
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(exc),
+                "erc_violations": exc.violations,
+                "partial_netlist": exc.partial_output,
+            },
+        )
+    except Exception as exc:
+        upsert_stage(project_id, "netlist", "failed",
+                     input_data=input_data, error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    upsert_stage(project_id, "netlist", "complete",
+                 input_data=input_data, output_data=output)
+    return RunStageResponse(stage_id=stage_id, output=output)
+
+
+@app.post("/projects/{project_id}/stage/placement", response_model=RunStageResponse)
+def run_placement_endpoint(project_id: int):
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    stages_by_type = {s["stage_type"]: s for s in get_stages_for_project(project_id)}
+    netlist_stage  = stages_by_type.get("netlist")
+    comp_stage     = stages_by_type.get("component_selection")
+    formal_stage   = stages_by_type.get("formal_requirements")
+
+    if not formal_stage or formal_stage["status"] != "complete":
+        raise HTTPException(status_code=400, detail="Complete formal_requirements stage first")
+    if not comp_stage or comp_stage["status"] != "complete":
+        raise HTTPException(status_code=400, detail="Complete component_selection stage first")
+    if not netlist_stage or netlist_stage["status"] != "complete":
+        raise HTTPException(status_code=400, detail="Complete netlist stage first")
+
+    component_selection  = comp_stage["output_json"]
+    formal_requirements  = formal_stage["output_json"]
+    netlist              = netlist_stage["output_json"]
+
+    input_data = {
+        "intent":               project["intent"],
+        "component_selection":  component_selection,
+        "formal_requirements":  formal_requirements,
+        "netlist":              netlist,
+    }
+    stage_id = upsert_stage(project_id, "placement", "running", input_data=input_data)
+
+    try:
+        output = run_stage6_placement(
+            component_selection=component_selection,
+            netlist=netlist,
+            formal_requirements=formal_requirements,
+        )
+    except Exception as exc:
+        upsert_stage(project_id, "placement", "failed",
+                     input_data=input_data, error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    # infeasible / timeout are complete stages, not failed ones
+    upsert_stage(project_id, "placement", "complete",
                  input_data=input_data, output_data=output)
     return RunStageResponse(stage_id=stage_id, output=output)
 

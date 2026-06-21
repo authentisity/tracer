@@ -9,6 +9,12 @@ from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import BaseModel
 
+import catalog as _catalog
+import erc as _erc
+import netlist_writer as _nw
+import placement_constraints as _pc
+import placement_solver as _ps
+
 _client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
 # Model is env-configurable so a deployment can pick a tier that fits its quota
 # (e.g. set TRACER_GEMINI_MODEL=gemini-2.5-flash-lite on the free tier).
@@ -519,3 +525,453 @@ def run_remediation(intent: str, validation: dict) -> dict:
     output = _call_structured(_RemediationOutput, prompt)
     output["all_clear"] = False
     return output
+
+
+# ── Stage 4: Component selection ──────────────────────────────────────────────
+# The LLM never invents part numbers. It emits parametric search criteria;
+# catalog.search() returns real matches; the LLM (or score) picks from those.
+
+class _ConstraintSpec(BaseModel):
+    name: str      # parameter key matching catalog.CatalogPart.parameters
+    operator: str  # eq | min | max | in
+    value: str     # string representation; "in" uses comma-separated values
+
+
+class _SearchCriteria(BaseModel):
+    functional_role: str
+    category: str   # mcu|ldo|resistor|capacitor|sensor|connector|led|diode|crystal|header|inductor
+    constraints: list[_ConstraintSpec]
+    satisfies_requirement_ids: list[str]
+
+
+class _SearchCriteriaList(BaseModel):
+    criteria: list[_SearchCriteria]
+
+
+class _PickedPart(BaseModel):
+    part_id: str
+    rationale: str
+
+
+# Parameter names the LLM should use, communicated in the decompose prompt.
+_CATALOG_SCHEMA_HINT = """
+Available catalog parameter names by category (use exact names in constraints):
+  mcu:       cpu, freq_mhz, flash_kb, ram_kb, gpio_count, i2c_count, spi_count, uart_count, usb_fs, package
+  ldo:       output_voltage_v, max_current_a, dropout_v, input_voltage_max_v, quiescent_current_ma, package
+  capacitor: capacitance_uf, voltage_v, dielectric, package
+  resistor:  resistance_ohm, tolerance_pct, power_w, package
+  sensor:    interface, measures, supply_v_min, supply_v_max, package
+  connector: connector_type, usb_version, mounting, current_rating_a
+  led:       color, package, vf_v, if_ma
+  crystal:   frequency_mhz, load_capacitance_pf, package
+  diode:     type, package, vf_v, vr_v
+  header:    pins, pitch_mm, rows, gender, mounting
+  inductor:  impedance_ohm_at_100mhz, current_rating_a, package
+""".strip()
+
+
+def _constraints_to_criteria(constraints: list[dict[str, str]]) -> dict[str, Any]:
+    """Convert list of {name, operator, value} dicts to catalog.search() criteria dict."""
+    result: dict[str, Any] = {}
+    for c in constraints:
+        name = c.get("name", "")
+        op = c.get("operator", "eq")
+        raw = c.get("value", "")
+        if not name:
+            continue
+        try:
+            num: Any = float(raw)
+        except (TypeError, ValueError):
+            num = None
+
+        entry = result.setdefault(name, {})
+        if op == "eq":
+            result[name] = {"eq": num if num is not None else raw}
+        elif op == "min":
+            entry["min"] = num if num is not None else raw
+        elif op == "max":
+            entry["max"] = num if num is not None else raw
+        elif op == "in":
+            result[name] = {"in": [v.strip() for v in raw.split(",")]}
+    return result
+
+
+def run_stage4_component_selection(formal_requirements: dict) -> dict:
+    """Select real catalog parts for every functional block implied by the requirements.
+
+    Flow:
+    1. LLM emits parametric search criteria per functional block (no part numbers).
+    2. catalog.search() returns matching real parts for each criterion.
+    3. If one match: select it. If multiple: LLM ranks and picks from real candidates only.
+       If zero: record in unresolved so failures are explicit.
+    """
+    reqs = formal_requirements.get("requirements", [])
+    req_summary = "\n".join(
+        f"  [{r.get('id', '?')}] {r.get('statement', '')}"
+        + (
+            f" ({r.get('parameter', '')} {r.get('operator', '')} "
+            f"{r.get('value', '')} {r.get('unit', '') or ''})"
+            if r.get("parameter")
+            else ""
+        )
+        for r in reqs
+    )
+
+    # Step 1 — LLM decomposes requirements into parametric search criteria.
+    decompose_prompt = (
+        "You are a senior PCB/electronics engineer designing a microcontroller breakout board. "
+        "Analyse the formal requirements below and decompose the board into functional blocks. "
+        "For each functional block emit parametric search criteria to find a suitable component.\n\n"
+        "Include all mandatory blocks for an MCU breakout: the MCU itself, an LDO 3.3 V regulator, "
+        "at least one I²C sensor matched to the requirements, decoupling capacitors (100 nF per "
+        "supply pin, bulk 10 µF at LDO output), I²C pull-up resistors (4.7 kΩ), LED(s) with "
+        "current-limit resistors, a USB-C connector, a crystal oscillator if the MCU needs an "
+        "external clock, ESD protection on USB data lines, and breakout pin headers.\n\n"
+        "Rules:\n"
+        "  - DO NOT invent part numbers — emit only search criteria.\n"
+        "  - operator must be one of: eq, min, max, in\n"
+        "  - value is always a string; for 'in' use comma-separated items, e.g. 'SOT-223,SOT-23-5'\n"
+        "  - satisfies_requirement_ids must reference IDs from the requirements list below.\n\n"
+        f"{_CATALOG_SCHEMA_HINT}\n\n"
+        f"Formal requirements:\n{req_summary}"
+    )
+    criteria_output = _call_structured(_SearchCriteriaList, decompose_prompt)
+    criteria_list = criteria_output.get("criteria", [])
+
+    selected: list[dict] = []
+    unresolved: list[dict] = []
+
+    for criterion in criteria_list:
+        role: str = criterion.get("functional_role", "unknown")
+        category: str = criterion.get("category", "")
+        raw_constraints: list[dict] = criterion.get("constraints", [])
+        req_ids: list[str] = criterion.get("satisfies_requirement_ids", [])
+
+        criteria_dict = _constraints_to_criteria(raw_constraints)
+        candidates = _catalog.search(category, criteria_dict)
+
+        if not candidates:
+            # Relax to category-only match so narrow constraints don't silently swallow blocks.
+            candidates = _catalog.search(category, {})
+
+        if not candidates:
+            unresolved.append({
+                "functional_role": role,
+                "reason": (
+                    f"No catalog parts in category '{category}'. "
+                    "Constraints: "
+                    + "; ".join(
+                        f"{c.get('name')} {c.get('operator')} {c.get('value')}"
+                        for c in raw_constraints
+                    )
+                ),
+            })
+            continue
+
+        if len(candidates) == 1:
+            part = candidates[0]
+            selected.append(_make_selected(role, part, req_ids,
+                                           f"Only catalog match: {part.description}"))
+            continue
+
+        # Step 3 — LLM picks one from the real candidate list.
+        candidates_lines = "\n".join(
+            f"  part_id={p.part_id}  mpn={p.mpn}  desc={p.description}  params={p.parameters}"
+            for p in candidates
+        )
+        constraints_summary = "\n".join(
+            f"  {c.get('name')} {c.get('operator')} {c.get('value')}"
+            for c in raw_constraints
+        )
+        pick_prompt = (
+            f"You are a senior PCB/electronics engineer selecting a component for: {role!r}.\n\n"
+            f"Search constraints:\n{constraints_summary}\n\n"
+            f"Catalog candidates (choose ONLY a part_id from this list):\n{candidates_lines}\n\n"
+            "Return the part_id of the best-fit component and a concise rationale. "
+            "You MUST return a part_id that appears verbatim in the candidate list above."
+        )
+        pick_result = _call_structured(_PickedPart, pick_prompt)
+
+        picked_id: str = pick_result.get("part_id", "")
+        rationale: str = pick_result.get("rationale", "")
+
+        # Anti-hallucination guard: verify the returned part_id is real.
+        part = next((p for p in candidates if p.part_id == picked_id), None)
+        if part is None:
+            part = candidates[0]
+            rationale = (
+                f"[fallback — model returned unknown part_id {picked_id!r}] {rationale}"
+            )
+
+        selected.append(_make_selected(role, part, req_ids, rationale))
+
+    return {"components": selected, "unresolved": unresolved}
+
+
+def _make_selected(
+    role: str,
+    part: "_catalog.CatalogPart",
+    req_ids: list[str],
+    rationale: str,
+) -> dict:
+    return {
+        "functional_role": role,
+        "part_id": part.part_id,
+        "mpn": part.mpn,
+        "kicad_symbol": part.kicad_symbol,
+        "kicad_footprint": part.kicad_footprint,
+        "category": part.category,
+        "satisfies_requirement_ids": req_ids,
+        "provenance": "catalog_search",
+        "rationale": rationale,
+    }
+
+
+# ── Stage 5: Netlist generation ───────────────────────────────────────────────
+# The LLM proposes connectivity; deterministic ERC gates persistence.
+
+class _NetPin(BaseModel):
+    component_role: str
+    pin_number: str
+
+
+class _Net5(BaseModel):
+    name: str
+    pins: list[_NetPin]
+    net_class: str                   # power | ground | signal | bus
+    satisfies_requirement_ids: list[str]
+    provenance: str
+    rationale: str
+
+
+class _UnconnectedPin(BaseModel):
+    component_role: str
+    pin_number: str
+    reason: str
+
+
+class _NetlistProposal(BaseModel):
+    nets: list[_Net5]
+    unconnected: list[_UnconnectedPin]
+
+
+def _build_pin_context(components: list[dict]) -> tuple[str, dict[str, dict]]:
+    """Return (LLM pin table, catalog_pins dict) for all selected components."""
+    catalog_pins: dict[str, dict] = {}
+    lines: list[str] = ["Component pin reference (role → part_id → pin# → name [type]):"]
+    for comp in components:
+        role = comp["functional_role"]
+        part_id = comp["part_id"]
+        pins = _catalog.get_pins(part_id)
+        catalog_pins[part_id] = pins
+        if not pins:
+            lines.append(f"  {role} ({part_id}): [no pin data]")
+            continue
+        pin_strs = ", ".join(
+            f"{num}:{info.get('name', num)}[{info.get('type', '?')}]"
+            for num, info in sorted(pins.items(), key=lambda kv: kv[0])
+        )
+        lines.append(f"  {role} ({part_id}): {pin_strs}")
+    return "\n".join(lines), catalog_pins
+
+
+def run_stage5_netlist(
+    component_selection: dict,
+    formal_requirements: dict,
+) -> dict:
+    """Generate a netlist from selected components and requirements.
+
+    Flow:
+    1. Build a pin context table from the catalog for every selected component.
+    2. Prompt the LLM to propose nets (connectivity), honouring ERC constraints.
+    3. Run deterministic ERC on the proposal.
+    4. On pass: persist and emit KiCad .net text.
+       On fail: raise ValueError with structured violations so the caller can
+                persist a failed stage and return them to the client.
+    """
+    components: list[dict] = component_selection.get("components", [])
+    if not components:
+        raise ValueError("component_selection has no components — run stage 4 first.")
+
+    reqs = formal_requirements.get("requirements", [])
+    req_summary = "\n".join(
+        f"  [{r.get('id', '?')}] {r.get('statement', '')}"
+        + (
+            f" ({r.get('parameter', '')} {r.get('operator', '')} "
+            f"{r.get('value', '')} {r.get('unit', '') or ''})"
+            if r.get("parameter")
+            else ""
+        )
+        for r in reqs
+    )
+
+    pin_context, catalog_pins = _build_pin_context(components)
+
+    comp_summary = "\n".join(
+        f"  {c['functional_role']} — {c['mpn']} ({c['category']})"
+        for c in components
+    )
+
+    prompt = (
+        "You are a senior PCB/electronics engineer. Produce a complete netlist for the MCU breakout "
+        "board described by the components and requirements below.\n\n"
+        "Rules:\n"
+        "  1. Every pin listed in the component reference MUST appear in exactly one net OR in the "
+        "     unconnected list. Pins typed 'nc' may be omitted from unconnected.\n"
+        "  2. Ground pins (type=ground) must go on a net with net_class='ground'.\n"
+        "  3. Power_in pins of ICs must go on a net with net_class='power'.\n"
+        "  4. Power_out pins of regulators/MCU 3.3 V output go on a net_class='power' net.\n"
+        "  5. Nets with SDA or SCL pins must also include a passive pin from a pull-up resistor.\n"
+        "  6. Each VDD net of an IC must include at least one capacitor passive pin.\n"
+        "  7. No two power_out or output pins may share the same net.\n"
+        "  8. Use descriptive net names: GND, VDD_3V3, VBUS, I2C_SDA, I2C_SCL, USB_DM, USB_DP, "
+        "     LED1, NRST, etc.\n"
+        "  9. satisfies_requirement_ids must reference IDs from the requirements list.\n"
+        " 10. Use ONLY pin numbers that appear in the component reference below.\n\n"
+        f"Selected components:\n{comp_summary}\n\n"
+        f"{pin_context}\n\n"
+        f"Formal requirements:\n{req_summary}"
+    )
+
+    raw = _call_structured(_NetlistProposal, prompt)
+    nets_raw: list[dict] = raw.get("nets", [])
+    unc_raw: list[dict] = raw.get("unconnected", [])
+
+    # Normalise unconnected into {pin_ref: {...}, reason: str} shape
+    unconnected: list[dict] = []
+    for u in unc_raw:
+        unconnected.append({
+            "pin_ref": {
+                "component_role": u.get("component_role", ""),
+                "pin_number": u.get("pin_number", ""),
+                "part_id": next(
+                    (c["part_id"] for c in components
+                     if c["functional_role"] == u.get("component_role")),
+                    "?",
+                ),
+            },
+            "reason": u.get("reason", ""),
+        })
+
+    # Normalise nets: embed part_id in each pin
+    role_to_part: dict[str, str] = {
+        c["functional_role"]: c["part_id"] for c in components
+    }
+    nets: list[dict] = []
+    for n in nets_raw:
+        pins_out = []
+        for p in n.get("pins", []):
+            role = p.get("component_role", "")
+            pins_out.append({
+                "component_role": role,
+                "part_id": role_to_part.get(role, "?"),
+                "pin_number": p.get("pin_number", ""),
+            })
+        nets.append({
+            "name": n.get("name", ""),
+            "pins": pins_out,
+            "net_class": n.get("net_class", "signal"),
+            "satisfies_requirement_ids": n.get("satisfies_requirement_ids", []),
+            "provenance": n.get("provenance", "llm_proposed"),
+            "rationale": n.get("rationale", ""),
+        })
+
+    # ── ERC ──────────────────────────────────────────────────────────────────
+    violations = _erc.run_erc(nets, unconnected, components, catalog_pins)
+    erc_passed = len(violations) == 0
+
+    # ── KiCad .net output ─────────────────────────────────────────────────────
+    kicad_net = _nw.write_kicad_net(components, nets, unconnected)
+
+    result: dict = {
+        "nets": nets,
+        "unconnected": unconnected,
+        "erc_passed": erc_passed,
+        "erc_violations": violations,
+        "kicad_net_file": kicad_net,
+    }
+
+    if not erc_passed:
+        raise _ErcFailure(violations, result)
+
+    return result
+
+
+class _ErcFailure(Exception):
+    """Raised when ERC finds violations; carries both the violations and the partial output."""
+    def __init__(self, violations: list[dict], partial_output: dict) -> None:
+        super().__init__(f"ERC failed with {len(violations)} violation(s)")
+        self.violations = violations
+        self.partial_output = partial_output
+
+
+# ── Stage 6: Component placement ─────────────────────────────────────────────
+# Solver-driven, not LLM-driven.  Constraints compiled from netlist topology
+# and formal requirements; Z3 finds a legal grid-quantised placement.
+
+def run_stage6_placement(
+    component_selection: dict,
+    netlist: dict,
+    formal_requirements: dict,
+    board_outline: Optional[dict] = None,
+    grid_mm: float = 0.5,
+    optimize: bool = False,
+    timeout_ms: int = 30_000,
+) -> dict:
+    """Compile placement constraints and solve with Z3.
+
+    An infeasible solve is a valid outcome: it is returned as a successful dict
+    with status="infeasible" and a structured unsat_reason.  The caller persists
+    this as a complete stage (not failed) so the user can inspect the reason and
+    adjust board size or requirements.
+
+    Raises ValueError for configuration errors (missing geometry, empty
+    component list) — those become failed stages in the endpoint.
+    """
+    components: list[dict] = component_selection.get("components", [])
+    if not components:
+        raise ValueError("component_selection has no components — run stage 4 first.")
+
+    # Build catalog_pins for all selected parts
+    catalog_pins: dict[str, dict] = {
+        comp["part_id"]: _catalog.get_pins(comp["part_id"])
+        for comp in components
+    }
+
+    # Compile — may raise ValueError listing parts with missing geometry
+    compiled = _pc.compile_constraints(
+        board_outline=board_outline,
+        components=components,
+        netlist=netlist,
+        formal_requirements=formal_requirements,
+        catalog_pins=catalog_pins,
+        grid_mm=grid_mm,
+        default_board_mm=(60.0, 60.0),
+    )
+
+    result = _ps.solve(compiled, optimize=optimize, timeout_ms=timeout_ms)
+
+    board = {
+        "width_mm":  compiled.board_w_units * grid_mm,
+        "height_mm": compiled.board_h_units * grid_mm,
+    }
+
+    if result.status == "placed":
+        return {
+            "board": board,
+            "components": list(result.positions.values()),
+            "status": "placed",
+            "unsat_reason": None,
+            "unsat_groups": [],
+            "objective_value": result.objective_value,
+        }
+
+    # infeasible or timeout — both are "complete" stages with an explanatory status
+    return {
+        "board": board,
+        "components": [],
+        "status": result.status,
+        "unsat_reason": result.unsat_reason,
+        "unsat_groups": result.unsat_groups,
+        "objective_value": None,
+    }
