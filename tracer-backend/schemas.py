@@ -81,3 +81,9 @@ class ReviseRequest(BaseModel):
 
 class ReviseResponse(BaseModel):
     ok: bool
+
+
+class ValidateRequest(BaseModel):
+    # Optional user-provided design artifact to validate against.
+    # When omitted, validation falls back to an AI-generated candidate design.
+    artifact: Optional[dict] = None

@@ -20,12 +20,20 @@ const api = {
   createProject: (name, intent) =>
     apiFetch('/projects', { method: 'POST', body: JSON.stringify({ name, intent }) }),
   getProject: (id) => apiFetch(`/projects/${id}`),
-  runStage: (projectId, stageName) =>
-    apiFetch(`/projects/${projectId}/stage/${stageName}`, { method: 'POST' }),
+  runStage: (projectId, stageName, body) =>
+    apiFetch(`/projects/${projectId}/stage/${stageName}`, {
+      method: 'POST',
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    }),
   revise: (stageId, editedOutput, note) =>
     apiFetch(`/stages/${stageId}/revise`, {
       method: 'POST',
       body: JSON.stringify({ edited_output: editedOutput, note }),
+    }),
+  saveArtifact: (projectId, artifact) =>
+    apiFetch(`/projects/${projectId}/stage/design_artifact`, {
+      method: 'POST',
+      body: JSON.stringify({ artifact }),
     }),
 }
 
@@ -78,7 +86,18 @@ const METHOD_LABEL = {
   judgment: 'reviewer',
   unit_mismatch: 'unit mismatch',
   incomplete_value: 'needs value',
+  unverified_reference: 'unverified ref',
 }
+
+const ARTIFACT_PLACEHOLDER = `{
+  "components": [
+    { "ref": "U1", "part": "ESP32-C3", "values": { "supply_voltage": "3.3 V" } }
+  ],
+  "nets": [
+    { "name": "3V3", "pins": ["U1.VDD"] }
+  ],
+  "parameters": { "input_voltage": "5 V", "sleep_current": "40 uA" }
+}`
 
 const CATEGORY_LABELS = {
   power: 'Power',
@@ -512,6 +531,8 @@ function ValidationOutput({ output, onEdit }) {
   const results = output.results ?? []
   const design = output.design ?? null
   const keyParameters = design?.key_parameters ?? []
+  const source = output.source ?? 'ai_candidate'
+  const fromArtifact = source === 'uploaded_artifact'
 
   return (
     <div className="stage-output">
@@ -519,12 +540,20 @@ function ValidationOutput({ output, onEdit }) {
         <span className="vsum-chip vsum-chip--pass">{summary.pass} pass</span>
         <span className="vsum-chip vsum-chip--fail">{summary.fail} fail</span>
         <span className="vsum-chip vsum-chip--review">{summary.needs_review} review</span>
+        {summary.flagged > 0 && (
+          <span className="vsum-chip vsum-chip--flagged">{summary.flagged} flagged</span>
+        )}
         <span className="vsum-total">of {summary.total} requirements</span>
+        <span className={`vsource vsource--${source}`}>
+          {fromArtifact ? '✓ validated your artifact' : 'AI candidate'}
+        </span>
       </div>
 
       {design && (
         <div className="output-field">
-          <h3 className="output-field-label">Candidate design (AI-generated)</h3>
+          <h3 className="output-field-label">
+            {fromArtifact ? 'Your design artifact' : 'Candidate design (AI-generated)'}
+          </h3>
           <p className="output-prose">{design.summary}</p>
           {design.components?.length > 0 && (
             <ul className="design-comp-list">
@@ -533,6 +562,16 @@ function ValidationOutput({ output, onEdit }) {
                   <span className="mono req-id">{c.ref}</span>
                   <span className="design-comp-part">{c.part}</span>
                   {c.rationale && <span className="design-comp-rationale">{c.rationale}</span>}
+                </li>
+              ))}
+            </ul>
+          )}
+          {design.nets?.length > 0 && (
+            <ul className="design-comp-list">
+              {design.nets.map((n, i) => (
+                <li key={`net-${i}`} className="design-comp">
+                  <span className="mono req-id">{n.name}</span>
+                  <span className="design-comp-rationale">{(n.pins ?? []).join(', ')}</span>
                 </li>
               ))}
             </ul>
@@ -586,6 +625,11 @@ function ValidationOutput({ output, onEdit }) {
                 )}
               </div>
               {r.rationale && <p className="check-rationale">{r.rationale}</p>}
+              {r.flagged_refs?.length > 0 && (
+                <p className="check-flagged">
+                  ⚠ references not in the design: {r.flagged_refs.join(', ')}
+                </p>
+              )}
             </div>
           )
         })}
@@ -596,6 +640,262 @@ function ValidationOutput({ output, onEdit }) {
           Edit results
         </button>
       </div>
+    </div>
+  )
+}
+
+// ── Design artifact input (Stage 4 — validate a real design) ─────────────────
+
+function parseCsvLine(line) {
+  const out = []
+  let cur = ''
+  let inQuotes = false
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (inQuotes) {
+      if (ch === '"' && line[i + 1] === '"') {
+        cur += '"'
+        i++
+      } else if (ch === '"') {
+        inQuotes = false
+      } else {
+        cur += ch
+      }
+    } else if (ch === '"') {
+      inQuotes = true
+    } else if (ch === ',') {
+      out.push(cur)
+      cur = ''
+    } else {
+      cur += ch
+    }
+  }
+  out.push(cur)
+  return out.map((s) => s.trim())
+}
+
+// Convert a pasted BOM CSV (header row + rows) into the artifact shape.
+function parseBomCsv(text) {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim())
+  if (lines.length < 2) return null
+  const header = parseCsvLine(lines[0]).map((h) => h.toLowerCase())
+  const find = (...names) => header.findIndex((h) => names.some((n) => h.includes(n)))
+  const refCol = find('refdes', 'reference', 'designator', 'ref')
+  const partCol = find('mpn', 'manufacturer part', 'part number', 'part', 'comment', 'description')
+  const valCol = find('value', 'val')
+  if (refCol === -1) return null
+  const components = []
+  for (let i = 1; i < lines.length; i++) {
+    const cells = parseCsvLine(lines[i])
+    const refsCell = cells[refCol] ?? ''
+    if (!refsCell) continue
+    const part = (partCol !== -1 ? cells[partCol] : '') || ''
+    const value = (valCol !== -1 ? cells[valCol] : '') || ''
+    for (const ref of refsCell.split(/[,;\s]+/).filter(Boolean)) {
+      const comp = { ref, part }
+      if (value) comp.values = { value }
+      components.push(comp)
+    }
+  }
+  if (!components.length) return null
+  return { components, nets: [], parameters: {} }
+}
+
+// ── KiCad netlist (S-expression) import ──────────────────────────────────────
+function tokenizeSexpr(text) {
+  const tokens = []
+  let i = 0
+  while (i < text.length) {
+    const ch = text[i]
+    if (ch === '(' || ch === ')') {
+      tokens.push(ch)
+      i++
+    } else if (ch === '"') {
+      i++
+      let s = ''
+      while (i < text.length && text[i] !== '"') {
+        if (text[i] === '\\' && i + 1 < text.length) i++
+        s += text[i]
+        i++
+      }
+      i++
+      tokens.push({ s })
+    } else if (/\s/.test(ch)) {
+      i++
+    } else {
+      let a = ''
+      while (i < text.length && !/[\s()"]/.test(text[i])) {
+        a += text[i]
+        i++
+      }
+      tokens.push({ a })
+    }
+  }
+  return tokens
+}
+
+function sexprTree(tokens) {
+  let i = 0
+  function build() {
+    const arr = []
+    while (i < tokens.length) {
+      const t = tokens[i++]
+      if (t === '(') arr.push(build())
+      else if (t === ')') return arr
+      else arr.push(t)
+    }
+    return arr
+  }
+  while (i < tokens.length && tokens[i] !== '(') i++
+  if (i >= tokens.length) return null
+  i++
+  return build()
+}
+
+// Parse a standard KiCad netlist export into the artifact shape.
+function parseKicadNetlist(text) {
+  const tree = sexprTree(tokenizeSexpr(text))
+  if (!tree || tree[0]?.a !== 'export') return null
+  const head = (node, name) => node.find((x) => Array.isArray(x) && x[0]?.a === name)
+  const val = (node, key) => {
+    const v = head(node, key)?.[1]
+    return v?.s ?? v?.a ?? ''
+  }
+  const compsNode = head(tree, 'components')
+  const netsNode = head(tree, 'nets')
+
+  const components = []
+  for (const comp of compsNode?.filter((x) => Array.isArray(x) && x[0]?.a === 'comp') ?? []) {
+    const ref = val(comp, 'ref')
+    const value = val(comp, 'value')
+    if (!ref) continue
+    const c = { ref, part: value }
+    if (value) c.values = { value }
+    components.push(c)
+  }
+
+  const nets = []
+  for (const net of netsNode?.filter((x) => Array.isArray(x) && x[0]?.a === 'net') ?? []) {
+    const name = val(net, 'name')
+    const pins = []
+    for (const node of net.filter((x) => Array.isArray(x) && x[0]?.a === 'node')) {
+      const ref = val(node, 'ref')
+      const pin = val(node, 'pin')
+      if (ref) pins.push(pin ? `${ref}.${pin}` : ref)
+    }
+    if (name) nets.push({ name, pins })
+  }
+
+  if (!components.length && !nets.length) return null
+  return { components, nets, parameters: {} }
+}
+
+function ArtifactInput({ value, onChange, candidate }) {
+  const [csv, setCsv] = useState('')
+  const [bomError, setBomError] = useState(null)
+  const [netlist, setNetlist] = useState('')
+  const [netError, setNetError] = useState(null)
+
+  function importBom() {
+    const parsed = parseBomCsv(csv)
+    if (!parsed) {
+      setBomError('Could not parse — need a header row with a Reference column.')
+      return
+    }
+    setBomError(null)
+    onChange(JSON.stringify(parsed, null, 2))
+  }
+
+  function importKicad() {
+    const parsed = parseKicadNetlist(netlist)
+    if (!parsed) {
+      setNetError('Could not parse — expecting a standard KiCad netlist (an (export …) S-expression).')
+      return
+    }
+    setNetError(null)
+    onChange(JSON.stringify(parsed, null, 2))
+  }
+
+  function fillFromCandidate() {
+    if (!candidate) return
+    const artifact = {
+      components: (candidate.components ?? []).map((c) => ({
+        ref: c.ref,
+        part: c.part,
+        values: {},
+      })),
+      nets: candidate.nets ?? [],
+      parameters: Object.fromEntries(
+        (candidate.key_parameters ?? []).map((p) => [
+          p.name,
+          [p.value, p.unit].filter(Boolean).join(' '),
+        ]),
+      ),
+    }
+    onChange(JSON.stringify(artifact, null, 2))
+  }
+
+  return (
+    <div className="artifact-input">
+      <div className="artifact-input-head">
+        <span className="output-field-label">
+          Design to validate <span className="artifact-optional">— optional</span>
+        </span>
+        {candidate?.components?.length > 0 && (
+          <button type="button" className="artifact-fill" onClick={fillFromCandidate}>
+            Fill from AI candidate
+          </button>
+        )}
+      </div>
+      <p className="artifact-hint">
+        Paste your board design as JSON to validate it. Leave blank to validate an AI-generated candidate.
+      </p>
+      <textarea
+        className="edit-textarea mono"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        rows={8}
+        spellCheck={false}
+        placeholder={ARTIFACT_PLACEHOLDER}
+      />
+      <details className="bom-import">
+        <summary>Import a BOM (CSV)</summary>
+        <p className="artifact-hint">
+          Paste a BOM with a header row (e.g. Reference, Value, Part). Cells like
+          &quot;C1, C2, C3&quot; are expanded into separate components.
+        </p>
+        <textarea
+          className="edit-textarea mono"
+          value={csv}
+          onChange={(e) => setCsv(e.target.value)}
+          rows={5}
+          spellCheck={false}
+          placeholder={'Reference,Value,Part\nU1,,ESP32-C3\nC1,10uF,GRM188R61A106'}
+        />
+        <button type="button" className="artifact-fill" onClick={importBom}>
+          Convert to artifact
+        </button>
+        {bomError && <p className="check-flagged">{bomError}</p>}
+      </details>
+      <details className="bom-import">
+        <summary>Import a KiCad netlist (.net)</summary>
+        <p className="artifact-hint">
+          Paste a standard KiCad netlist export (an <code>(export …)</code> S-expression).
+          Components and nets are extracted.
+        </p>
+        <textarea
+          className="edit-textarea mono"
+          value={netlist}
+          onChange={(e) => setNetlist(e.target.value)}
+          rows={5}
+          spellCheck={false}
+          placeholder={'(export (version "E")\n  (components (comp (ref "U1") (value "ESP32-C3")))\n  (nets (net (name "3V3") (node (ref "U1") (pin "1")))))'}
+        />
+        <button type="button" className="artifact-fill" onClick={importKicad}>
+          Convert to artifact
+        </button>
+        {netError && <p className="check-flagged">{netError}</p>}
+      </details>
     </div>
   )
 }
@@ -634,11 +934,14 @@ function RemediationOutput({ output }) {
 
 // ── Stage panel ──────────────────────────────────────────────────────────────
 
-function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise }) {
+function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise, persistedArtifact }) {
   const [running, setRunning] = useState(false)
   const [error, setError] = useState(null)
   const [savingRevision, setSavingRevision] = useState(false)
   const [revisionSaved, setRevisionSaved] = useState(false)
+  const [artifact, setArtifact] = useState(
+    persistedArtifact ? JSON.stringify(persistedArtifact, null, 2) : '',
+  )
   const pendingEditRef = useRef(null)
 
   const status = stage?.status ?? 'pending'
@@ -647,9 +950,26 @@ function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise }) {
 
   async function runStage() {
     setError(null)
+    let body
+    if (stageDef.key === 'validation') {
+      const trimmed = artifact.trim()
+      if (trimmed) {
+        try {
+          body = { artifact: JSON.parse(trimmed) }
+        } catch {
+          setError('Design artifact must be valid JSON — fix it or clear the box to use an AI candidate.')
+          return
+        }
+      } else {
+        body = {} // no artifact → validate an AI-generated candidate
+      }
+    }
     setRunning(true)
     try {
-      const result = await api.runStage(projectId, STAGE_ENDPOINT[stageDef.key])
+      if (stageDef.key === 'validation' && body?.artifact) {
+        await api.saveArtifact(projectId, body.artifact) // persist as a design_artifact stage
+      }
+      const result = await api.runStage(projectId, STAGE_ENDPOINT[stageDef.key], body)
       onStageComplete(stageDef.key, result)
     } catch (err) {
       setError(err.message)
@@ -719,6 +1039,10 @@ function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise }) {
         <div className="saved-banner" role="status">
           Changes saved — downstream stages will use your version.
         </div>
+      )}
+
+      {stageDef.key === 'validation' && !isRunning && (
+        <ArtifactInput value={artifact} onChange={setArtifact} candidate={output?.design} />
       )}
 
       {status === 'pending' && !isRunning && (
@@ -997,6 +1321,7 @@ export default function App() {
             projectId={projectId}
             onStageComplete={handleStageComplete}
             onRevise={handleRevise}
+            persistedArtifact={project.stages?.find((s) => s.stage_type === 'design_artifact')?.output_json}
           />
 
           {/* next-stage nudge */}
