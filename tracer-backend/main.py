@@ -29,6 +29,7 @@ from schemas import (
     RunStageResponse,
     ReviseRequest,
     ReviseResponse,
+    ValidateRequest,
 )
 
 
@@ -158,7 +159,7 @@ def run_formal_requirements_endpoint(project_id: int):
 
 
 @app.post("/projects/{project_id}/stage/validation", response_model=RunStageResponse)
-def run_validation_endpoint(project_id: int):
+def run_validation_endpoint(project_id: int, body: ValidateRequest | None = None):
     project = get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -172,11 +173,18 @@ def run_validation_endpoint(project_id: int):
 
     intent_expansion = intent_stage["output_json"] if intent_stage else {}
     formal_requirements = formal_stage["output_json"]
-    input_data = {"intent": project["intent"], "formal_requirements": formal_requirements}
+    artifact = body.artifact if body else None
+    input_data = {
+        "intent": project["intent"],
+        "formal_requirements": formal_requirements,
+        "artifact": artifact,
+    }
     stage_id = upsert_stage(project_id, "validation", "running", input_data=input_data)
 
     try:
-        output = run_validation(project["intent"], intent_expansion, formal_requirements)
+        output = run_validation(
+            project["intent"], intent_expansion, formal_requirements, artifact=artifact
+        )
     except Exception as exc:
         upsert_stage(project_id, "validation", "failed",
                      input_data=input_data, error=str(exc))

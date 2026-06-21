@@ -303,31 +303,64 @@ def _resolve_verdict(req: dict, design_value, llm_verdict: str) -> tuple[str, st
     return _normalized_verdict(llm_verdict), "judgment"
 
 
-def run_validation(intent: str, intent_expansion: dict, formal_requirements: dict) -> dict:
+def _design_from_artifact(artifact: dict) -> tuple[dict, str, str]:
+    """Shape a user-provided design artifact into a design dict + prompt lines."""
+    components = []
+    for c in artifact.get("components") or []:
+        values = c.get("values") or {}
+        rationale = "; ".join(f"{k}: {v}" for k, v in values.items()) or "(provided)"
+        components.append({"ref": c.get("ref", ""), "part": c.get("part", ""), "rationale": rationale})
+    params = artifact.get("parameters") or {}
+    key_parameters = [
+        {"name": k, "value": str(v), "unit": None, "rationale": "user-provided"}
+        for k, v in params.items()
+    ]
+    param_summary = "; ".join(f"{k}: {v}" for k, v in params.items())
+    design = {
+        "summary": "User-provided design artifact" + (f" — {param_summary}" if param_summary else ""),
+        "components": components,
+        "key_parameters": key_parameters,
+    }
+    comp_lines = "\n".join(f"  {c['ref']}: {c['part']} — {c['rationale']}" for c in components)
+    parameter_lines = "\n".join(f"  {p['name']}: {p['value']}" for p in key_parameters)
+    return design, comp_lines, parameter_lines
+
+
+def run_validation(
+    intent: str,
+    intent_expansion: dict,
+    formal_requirements: dict,
+    artifact: Optional[dict] = None,
+) -> dict:
     reqs = formal_requirements.get("requirements", [])
+    source = "uploaded_artifact" if artifact else "ai_candidate"
 
-    # 1) Generate a concrete candidate design from the requirements.
-    req_lines = "\n".join(f"  [{r.get('id', '?')}] {r.get('statement', '')}" for r in reqs)
-    design_prompt = (
-        "You are a senior PCB/electronics engineer. Propose ONE concrete candidate board design "
-        "that attempts to satisfy the requirements below. List the key components you would choose "
-        "(reference designator, a specific real part or part family, and a one-line rationale), "
-        "plus key design parameters with concrete values and units where applicable. Pick realistic "
-        "parts and concrete values.\n\n"
-        f"Board goal:\n{intent_expansion.get('restated_goal', intent)}\n\n"
-        f"Requirements:\n{req_lines}"
-    )
-    design = _call_structured(_CandidateDesign, design_prompt)
+    if artifact:
+        # Validate the design the user actually provided.
+        design, comp_lines, parameter_lines = _design_from_artifact(artifact)
+    else:
+        # 1) Generate a concrete candidate design from the requirements.
+        req_lines = "\n".join(f"  [{r.get('id', '?')}] {r.get('statement', '')}" for r in reqs)
+        design_prompt = (
+            "You are a senior PCB/electronics engineer. Propose ONE concrete candidate board design "
+            "that attempts to satisfy the requirements below. List the key components you would choose "
+            "(reference designator, a specific real part or part family, and a one-line rationale), "
+            "plus key design parameters with concrete values and units where applicable. Pick realistic "
+            "parts and concrete values.\n\n"
+            f"Board goal:\n{intent_expansion.get('restated_goal', intent)}\n\n"
+            f"Requirements:\n{req_lines}"
+        )
+        design = _call_structured(_CandidateDesign, design_prompt)
 
-    # 2) Review the candidate design against each requirement.
-    comp_lines = "\n".join(
-        f"  {c.get('ref', '?')}: {c.get('part', '')} — {c.get('rationale', '')}"
-        for c in design.get("components", [])
-    )
-    parameter_lines = "\n".join(
-        f"  {p.get('name', '')}: {p.get('value', '')} {p.get('unit') or ''} — {p.get('rationale', '')}"
-        for p in design.get("key_parameters", [])
-    )
+        # 2) Review the candidate design against each requirement.
+        comp_lines = "\n".join(
+            f"  {c.get('ref', '?')}: {c.get('part', '')} — {c.get('rationale', '')}"
+            for c in design.get("components", [])
+        )
+        parameter_lines = "\n".join(
+            f"  {p.get('name', '')}: {p.get('value', '')} {p.get('unit') or ''} — {p.get('rationale', '')}"
+            for p in design.get("key_parameters", [])
+        )
     req_detail = "\n".join(
         f"  [{r.get('id', '?')}] {r.get('statement', '')}"
         + (
@@ -381,4 +414,4 @@ def run_validation(intent: str, intent_expansion: dict, formal_requirements: dic
         "fail": sum(1 for x in results if x["verdict"] == "fail"),
         "needs_review": sum(1 for x in results if x["verdict"] == "needs_review"),
     }
-    return {"design": design, "results": results, "summary": summary}
+    return {"design": design, "results": results, "summary": summary, "source": source}

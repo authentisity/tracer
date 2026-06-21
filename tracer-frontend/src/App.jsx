@@ -20,8 +20,11 @@ const api = {
   createProject: (name, intent) =>
     apiFetch('/projects', { method: 'POST', body: JSON.stringify({ name, intent }) }),
   getProject: (id) => apiFetch(`/projects/${id}`),
-  runStage: (projectId, stageName) =>
-    apiFetch(`/projects/${projectId}/stage/${stageName}`, { method: 'POST' }),
+  runStage: (projectId, stageName, body) =>
+    apiFetch(`/projects/${projectId}/stage/${stageName}`, {
+      method: 'POST',
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    }),
   revise: (stageId, editedOutput, note) =>
     apiFetch(`/stages/${stageId}/revise`, {
       method: 'POST',
@@ -72,6 +75,13 @@ const METHOD_LABEL = {
   unit_mismatch: 'unit mismatch',
   incomplete_value: 'needs value',
 }
+
+const ARTIFACT_PLACEHOLDER = `{
+  "components": [
+    { "ref": "U1", "part": "ESP32-C3", "values": { "supply_voltage": "3.3 V" } }
+  ],
+  "parameters": { "input_voltage": "5 V", "sleep_current": "40 uA" }
+}`
 
 const CATEGORY_LABELS = {
   power: 'Power',
@@ -505,6 +515,8 @@ function ValidationOutput({ output, onEdit }) {
   const results = output.results ?? []
   const design = output.design ?? null
   const keyParameters = design?.key_parameters ?? []
+  const source = output.source ?? 'ai_candidate'
+  const fromArtifact = source === 'uploaded_artifact'
 
   return (
     <div className="stage-output">
@@ -513,11 +525,16 @@ function ValidationOutput({ output, onEdit }) {
         <span className="vsum-chip vsum-chip--fail">{summary.fail} fail</span>
         <span className="vsum-chip vsum-chip--review">{summary.needs_review} review</span>
         <span className="vsum-total">of {summary.total} requirements</span>
+        <span className={`vsource vsource--${source}`}>
+          {fromArtifact ? '✓ validated your artifact' : 'AI candidate'}
+        </span>
       </div>
 
       {design && (
         <div className="output-field">
-          <h3 className="output-field-label">Candidate design (AI-generated)</h3>
+          <h3 className="output-field-label">
+            {fromArtifact ? 'Your design artifact' : 'Candidate design (AI-generated)'}
+          </h3>
           <p className="output-prose">{design.summary}</p>
           {design.components?.length > 0 && (
             <ul className="design-comp-list">
@@ -593,6 +610,54 @@ function ValidationOutput({ output, onEdit }) {
   )
 }
 
+// ── Design artifact input (Stage 4 — validate a real design) ─────────────────
+
+function ArtifactInput({ value, onChange, candidate }) {
+  function fillFromCandidate() {
+    if (!candidate) return
+    const artifact = {
+      components: (candidate.components ?? []).map((c) => ({
+        ref: c.ref,
+        part: c.part,
+        values: {},
+      })),
+      parameters: Object.fromEntries(
+        (candidate.key_parameters ?? []).map((p) => [
+          p.name,
+          [p.value, p.unit].filter(Boolean).join(' '),
+        ]),
+      ),
+    }
+    onChange(JSON.stringify(artifact, null, 2))
+  }
+
+  return (
+    <div className="artifact-input">
+      <div className="artifact-input-head">
+        <span className="output-field-label">
+          Design to validate <span className="artifact-optional">— optional</span>
+        </span>
+        {candidate?.components?.length > 0 && (
+          <button type="button" className="artifact-fill" onClick={fillFromCandidate}>
+            Fill from AI candidate
+          </button>
+        )}
+      </div>
+      <p className="artifact-hint">
+        Paste your board design as JSON to validate it. Leave blank to validate an AI-generated candidate.
+      </p>
+      <textarea
+        className="edit-textarea mono"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        rows={8}
+        spellCheck={false}
+        placeholder={ARTIFACT_PLACEHOLDER}
+      />
+    </div>
+  )
+}
+
 // ── Stage panel ──────────────────────────────────────────────────────────────
 
 function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise }) {
@@ -600,6 +665,7 @@ function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise }) {
   const [error, setError] = useState(null)
   const [savingRevision, setSavingRevision] = useState(false)
   const [revisionSaved, setRevisionSaved] = useState(false)
+  const [artifact, setArtifact] = useState('')
   const pendingEditRef = useRef(null)
 
   const status = stage?.status ?? 'pending'
@@ -608,9 +674,23 @@ function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise }) {
 
   async function runStage() {
     setError(null)
+    let body
+    if (stageDef.key === 'validation') {
+      const trimmed = artifact.trim()
+      if (trimmed) {
+        try {
+          body = { artifact: JSON.parse(trimmed) }
+        } catch {
+          setError('Design artifact must be valid JSON — fix it or clear the box to use an AI candidate.')
+          return
+        }
+      } else {
+        body = {} // no artifact → validate an AI-generated candidate
+      }
+    }
     setRunning(true)
     try {
-      const result = await api.runStage(projectId, STAGE_ENDPOINT[stageDef.key])
+      const result = await api.runStage(projectId, STAGE_ENDPOINT[stageDef.key], body)
       onStageComplete(stageDef.key, result)
     } catch (err) {
       setError(err.message)
@@ -673,6 +753,10 @@ function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise }) {
         <div className="saved-banner" role="status">
           Changes saved — downstream stages will use your version.
         </div>
+      )}
+
+      {stageDef.key === 'validation' && !isRunning && (
+        <ArtifactInput value={artifact} onChange={setArtifact} candidate={output?.design} />
       )}
 
       {status === 'pending' && !isRunning && (
