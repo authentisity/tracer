@@ -1,1449 +1,1158 @@
-import { useState, useCallback, useEffect, useRef } from 'react'
-
-const API = 'http://localhost:8000'
-
-// ── API helpers ──────────────────────────────────────────────────────────────
-
-async function apiFetch(path, options = {}) {
-  const res = await fetch(`${API}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  })
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}))
-    throw new Error(body.detail ?? `HTTP ${res.status}`)
-  }
-  return res.json()
-}
-
-const api = {
-  createProject: (name, intent) =>
-    apiFetch('/projects', { method: 'POST', body: JSON.stringify({ name, intent }) }),
-  getProject: (id) => apiFetch(`/projects/${id}`),
-  runStage: (projectId, stageName, body) =>
-    apiFetch(`/projects/${projectId}/stage/${stageName}`, {
-      method: 'POST',
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    }),
-  revise: (stageId, editedOutput, note) =>
-    apiFetch(`/stages/${stageId}/revise`, {
-      method: 'POST',
-      body: JSON.stringify({ edited_output: editedOutput, note }),
-    }),
-  saveArtifact: (projectId, artifact) =>
-    apiFetch(`/projects/${projectId}/stage/design_artifact`, {
-      method: 'POST',
-      body: JSON.stringify({ artifact }),
-    }),
-}
-
-// ── Constants ────────────────────────────────────────────────────────────────
-
-const STAGES = [
-  {
-    key: 'intent_expansion',
-    label: 'Intent Analysis',
-    shortLabel: 'Intent',
-    description: 'Understand and expand your description',
-  },
-  {
-    key: 'structured_bullets',
-    label: 'Structured Requirements',
-    shortLabel: 'Requirements',
-    description: 'Organise into categories with provenance',
-  },
-  {
-    key: 'formal_requirements',
-    label: 'Formal Specification',
-    shortLabel: 'Formal Spec',
-    description: 'Machine-readable spec with test criteria',
-  },
-  {
-    key: 'validation',
-    label: 'Validation',
-    shortLabel: 'Validation',
-    description: 'Check a candidate design against the spec',
-  },
-  {
-    key: 'remediation',
-    label: 'Remediation',
-    shortLabel: 'Fixes',
-    description: 'Turn failed checks into concrete design fixes',
-  },
-]
-
-const STAGE_ENDPOINT = {
-  intent_expansion: 'intent_expansion',
-  structured_bullets: 'structured_bullets',
-  formal_requirements: 'formal_requirements',
-  validation: 'validation',
-  remediation: 'remediation',
-}
-
-const VERDICT_LABEL = { pass: 'Pass', fail: 'Fail', needs_review: 'Review' }
-const METHOD_LABEL = {
-  deterministic: 'math check',
-  judgment: 'reviewer',
-  unit_mismatch: 'unit mismatch',
-  incomplete_value: 'needs value',
-  unverified_reference: 'unverified ref',
-}
-
-const ARTIFACT_PLACEHOLDER = `{
-  "components": [
-    { "ref": "U1", "part": "ESP32-C3", "values": { "supply_voltage": "3.3 V" } }
-  ],
-  "nets": [
-    { "name": "3V3", "pins": ["U1.VDD"] }
-  ],
-  "parameters": { "input_voltage": "5 V", "sleep_current": "40 uA" }
-}`
+import { useEffect, useMemo, useRef, useState } from 'react'
+import './App.css'
+import * as api from './api'
 
 const CATEGORY_LABELS = {
   power: 'Power',
   interfaces: 'Interfaces',
   components: 'Components',
-  signal_integrity: 'Signal Integrity',
+  signal: 'Signal Integrity',
   thermal: 'Thermal',
   mechanical: 'Mechanical',
   placement: 'Placement',
-  other: 'Other',
 }
 
-// ── Small primitives ─────────────────────────────────────────────────────────
+const CATEGORY_ORDER = [
+  'power',
+  'interfaces',
+  'components',
+  'signal',
+  'thermal',
+  'mechanical',
+  'placement',
+]
 
-function ProvenanceTag({ provenance }) {
-  return (
-    <span className={`provenance-tag provenance-${provenance}`}>
-      {provenance === 'user_stated' ? 'stated' : 'inferred'}
-    </span>
+const STAGE_DEFS = [
+  { num: '01', label: 'Describe board', screen: 'prompt' },
+  { num: '02', label: 'Intent analysis', screen: null },
+  { num: '03', label: 'Structured requirements', screen: 'requirements' },
+  { num: '04', label: 'Design validation', screen: 'validation' },
+  { num: '05', label: 'Remediation', screen: 'remediation' },
+  { num: '06', label: 'Export report', screen: 'report' },
+]
+
+const SCREEN_STAGE = {
+  prompt: 1,
+  analyzing: 2,
+  requirements: 3,
+  validation: 4,
+  remediation: 5,
+  report: 6,
+}
+
+const DESIGN_SOURCES = [
+  {
+    key: 'ai',
+    label: 'AI-generated candidate',
+    hint: 'Let Tracer synthesize a candidate design straight from the formal spec.',
+  },
+  {
+    key: 'json',
+    label: 'Paste JSON',
+    hint: 'Paste a design description as a JSON object of populated parameters.',
+  },
+  {
+    key: 'bom',
+    label: 'BOM CSV',
+    hint: 'Drop in a bill of materials — Tracer maps line items to requirements.',
+  },
+  {
+    key: 'netlist',
+    label: 'KiCad netlist',
+    hint: 'Import a .net file exported from KiCad and validate against the spec.',
+  },
+]
+
+const CANDIDATE_DESIGN = `{
+  "design": "rev-c-power-mux candidate",
+  "source": "tracer-synthesized",
+  "input": { "range": "9-36 V", "connector": "USB-C" },
+  "rails": [
+    { "net": "VOUT", "v": 5.0, "i_max": 3.0 },
+    { "net": "V3V3", "v": 3.3, "i_max": 1.0 }
+  ],
+  "protection": { "reverse_polarity": "P-FET", "iq_typ_uA": 68 },
+  "interfaces": ["USB-C USB2.0 FS", "I2C @ 400kHz"],
+  "thermal": { "ambient_max_c": 70, "junction_margin_c": 12 },
+  "mechanical": { "outline_mm": "50 x 35", "debug": "none" }
+}`
+
+const DEFAULT_BRIEF =
+  'Small USB-C powered mux board. 9–36 V input, needs 5 V at 3 A out. Talks I²C to a host controller. Must fit a 50 × 35 mm enclosure and run up to 70 °C ambient.'
+
+const STARTERS = {
+  mux: DEFAULT_BRIEF,
+  ble: 'Compact BLE sensor node. Coin-cell powered (CR2032), reads a BME280 over I²C, advertises every 2 s. Chip antenna on board, fits a 25 mm round PCB, indoor use.',
+  motor: 'Brushed DC motor driver. 12 V supply, up to 5 A continuous. STM32 control over CAN, current sense and thermal shutdown. 60 × 40 mm board, automotive cabin.',
+}
+
+const STARTER_OPTIONS = [
+  { key: 'mux', label: 'USB-C power mux' },
+  { key: 'ble', label: 'BLE sensor node' },
+  { key: 'motor', label: 'DC motor driver' },
+]
+
+const EXTRACT_TAGS = [
+  'Power',
+  'Interfaces',
+  'Components',
+  'Signal Integrity',
+  'Thermal',
+  'Mechanical',
+  'Placement',
+]
+
+const ANALYZING_STEPS = [
+  'Parsing description',
+  'Classifying by domain',
+  'Extracting stated values',
+  'Inferring gaps',
+]
+
+function getConfidenceColor(conf) {
+  if (conf >= 0.85) return '#3f7d57'
+  if (conf >= 0.7) return '#c2620e'
+  return '#cf9134'
+}
+
+function getBarStyle(conf) {
+  return {
+    width: `${Math.round(conf * 100)}%`,
+    background: getConfidenceColor(conf),
+  }
+}
+
+function buildFormalSpec(requirements) {
+  const now = new Date().toISOString().slice(0, 10)
+  const grouped = {}
+  requirements.forEach((req) => {
+    if (!grouped[req.cat]) grouped[req.cat] = []
+    grouped[req.cat].push({
+      id: req.id,
+      title: req.title,
+      value: req.value,
+      origin: req.kind,
+      confidence: Number(req.conf.toFixed(2)),
+    })
+  })
+
+  const output = {
+    project: 'rev-c-power-mux',
+    revision: 'C',
+    generated: now,
+    summary: {
+      total: requirements.length,
+      stated: requirements.filter((r) => r.kind === 'stated').length,
+      inferred: requirements.filter((r) => r.kind === 'inferred').length,
+      confidence: Number(
+        (
+          requirements.reduce((sum, r) => sum + r.conf, 0) / requirements.length
+        ).toFixed(2)
+      ),
+    },
+    requirements: {},
+  }
+
+  Object.keys(grouped).forEach((cat) => {
+    output.requirements[cat] = grouped[cat]
+  })
+
+  return output
+}
+
+function formatCurrency(value) {
+  return value.toString()
+}
+
+const STATUS_GLYPH = { pass: '✓', warn: '!', fail: '✕' }
+const STATUS_WORD = { pass: 'PASS', warn: 'WARN', fail: 'FAIL' }
+
+function buildReport(requirements, checks, applied) {
+  const now = new Date().toISOString().slice(0, 10)
+  const pass = checks.filter((c) => c.status === 'pass').length
+  const warn = checks.filter((c) => c.status === 'warn').length
+  const fail = checks.filter((c) => c.status === 'fail').length
+  const issues = checks.filter((c) => c.status !== 'pass')
+  const resolved = issues.filter((c) => applied[c.id]).length
+  const verdict = fail > 0 ? '❌ FAILED' : warn > 0 ? '⚠️ PASSED WITH WARNINGS' : '✅ PASSED'
+
+  const lines = []
+  lines.push('# Tracer — Design Validation Report')
+  lines.push('')
+  lines.push(`**Project:** rev-c-power-mux &nbsp;·&nbsp; **Revision:** C &nbsp;·&nbsp; **Generated:** ${now}`)
+  lines.push('')
+  lines.push(`**Verdict:** ${verdict}`)
+  lines.push('')
+  lines.push('## Summary')
+  lines.push('')
+  lines.push('| Metric | Count |')
+  lines.push('| --- | --- |')
+  lines.push(`| Requirements checked | ${checks.length} |`)
+  lines.push(`| Passed | ${pass} |`)
+  lines.push(`| Warnings | ${warn} |`)
+  lines.push(`| Failed | ${fail} |`)
+  lines.push(`| Issues resolved | ${resolved} / ${issues.length} |`)
+  lines.push('')
+  lines.push('## Validation Results')
+  lines.push('')
+  lines.push('| ID | Requirement | Expected | Actual | Result |')
+  lines.push('| --- | --- | --- | --- | --- |')
+  checks.forEach((c) => {
+    lines.push(`| ${c.id} | ${c.title} | ${c.expected} | ${c.actual} | ${STATUS_WORD[c.status]} |`)
+  })
+  lines.push('')
+  if (issues.length) {
+    lines.push('## Remediation')
+    lines.push('')
+    issues.forEach((c) => {
+      const mark = applied[c.id] ? '[x]' : '[ ]'
+      lines.push(`- ${mark} **${c.id} — ${c.title}** (${STATUS_WORD[c.status]})`)
+      lines.push(`  - Issue: expected ${c.expected}, got ${c.actual}.`)
+      if (c.fix) lines.push(`  - Fix: ${c.fix}`)
+    })
+    lines.push('')
+  }
+  lines.push('## Requirements Baseline')
+  lines.push('')
+  lines.push('| ID | Title | Value | Origin | Confidence |')
+  lines.push('| --- | --- | --- | --- | --- |')
+  requirements.forEach((r) => {
+    lines.push(`| ${r.id} | ${r.title} | ${r.value} | ${r.kind} | ${Math.round(r.conf * 100)}% |`)
+  })
+  lines.push('')
+  lines.push('---')
+  lines.push('_Generated by Tracer · requirements workbench_')
+  return lines.join('\n')
+}
+
+// ── Backend → view-model mappers ───────────────────────────────────────────────
+// The FastAPI pipeline speaks a richer schema than the UI; these translate each
+// stage's output into the shapes the screens already render.
+
+const CATEGORY_MAP = {
+  power: 'power',
+  interfaces: 'interfaces',
+  components: 'components',
+  signal_integrity: 'signal',
+  signal: 'signal',
+  thermal: 'thermal',
+  mechanical: 'mechanical',
+  placement: 'placement',
+  other: 'components',
+}
+
+const OPERATOR_GLYPH = { '<=': '≤', '>=': '≥', '<': '<', '>': '>', '==': '=', '=': '' }
+
+// Build a readable constraint like "≤ 50 µA" / "5 V" from parameter/operator/value/unit.
+function constraintText(r) {
+  if (r.value === null || r.value === undefined || r.value === '') return ''
+  const op = OPERATOR_GLYPH[r.operator] ?? (r.operator || '')
+  return [op, r.value, r.unit].filter((x) => x !== '' && x !== null && x !== undefined).join(' ').trim()
+}
+
+function briefName(brief) {
+  const words = brief.trim().split(/\s+/).slice(0, 6).join(' ')
+  return words.slice(0, 60) || 'Untitled board'
+}
+
+function mapFormalToRequirements(formal) {
+  const reqs = (formal && formal.requirements) || []
+  return reqs.map((r) => {
+    const constraint = constraintText(r)
+    return {
+      id: r.id,
+      cat: CATEGORY_MAP[r.category] || 'components',
+      title: r.statement || r.parameter || r.id,
+      value: constraint || r.parameter || '—',
+      kind: r.provenance === 'user_stated' ? 'stated' : 'inferred',
+      conf: typeof r.confidence === 'number' ? r.confidence : 0.7,
+    }
+  })
+}
+
+const VERDICT_TO_STATUS = { pass: 'pass', fail: 'fail', needs_review: 'warn' }
+
+function mapValidationToChecks(validation) {
+  const results = (validation && validation.results) || []
+  return results.map((r) => {
+    let actual = r.design_value
+    if (actual === null || actual === undefined || actual === '') {
+      actual = r.flagged_refs && r.flagged_refs.length ? 'unverified reference' : 'not specified'
+    }
+    return {
+      id: r.req_id,
+      title: r.statement || r.req_id,
+      expected: String(constraintText(r) || r.statement || '—'),
+      actual: String(actual),
+      status: VERDICT_TO_STATUS[r.verdict] || 'warn',
+      // .fix is populated later from the remediation stage
+    }
+  })
+}
+
+const ERROR_BANNER_STYLE = {
+  marginTop: 14,
+  padding: '11px 15px',
+  borderRadius: 10,
+  background: '#fbe9e7',
+  border: '1px solid #f1c4bd',
+  color: '#9a2b1f',
+  fontSize: 14,
+  lineHeight: 1.4,
+}
+
+export default function App() {
+  const [requirements, setRequirements] = useState([])
+  const [filter, setFilter] = useState('all')
+  const [category, setCategory] = useState('all')
+  const [screen, setScreen] = useState('prompt')
+  const [brief, setBrief] = useState(DEFAULT_BRIEF)
+  const [copied, setCopied] = useState(false)
+  const [designSource, setDesignSource] = useState('ai')
+  const [designText, setDesignText] = useState(CANDIDATE_DESIGN)
+  const [validated, setValidated] = useState(false)
+  const [appliedFixes, setAppliedFixes] = useState({})
+  const [reportDownloaded, setReportDownloaded] = useState(false)
+  const [projectId, setProjectId] = useState(null)
+  const [checks, setChecks] = useState([])
+  const [validating, setValidating] = useState(false)
+  const [error, setError] = useState(null)
+  const timeoutRef = useRef(null)
+  const analyzeRef = useRef(null)
+  const validateRef = useRef(null)
+
+  useEffect(() => {
+    return () => {
+      clearTimeout(timeoutRef.current)
+      clearTimeout(analyzeRef.current)
+      clearTimeout(validateRef.current)
+    }
+  }, [])
+
+  const stage = SCREEN_STAGE[screen] || 1
+  const formalized = stage >= 4
+  const statusText =
+    screen === 'prompt'
+      ? 'draft'
+      : screen === 'analyzing'
+      ? 'analyzing'
+      : screen === 'requirements'
+      ? 'structured'
+      : screen === 'validation'
+      ? validated
+        ? 'validated'
+        : 'validating'
+      : screen === 'remediation'
+      ? 'remediating'
+      : 'complete'
+
+  const handleAnalyze = async () => {
+    if (!brief.trim()) return
+    setError(null)
+    setValidated(false)
+    setChecks([])
+    setScreen('analyzing')
+    try {
+      const { project_id } = await api.createProject(briefName(brief), brief)
+      setProjectId(project_id)
+      // Each stage feeds the next; the backend persists every step.
+      await api.runStage(project_id, 'intent_expansion')
+      await api.runStage(project_id, 'structured_bullets')
+      const formal = await api.runStage(project_id, 'formal_requirements')
+      const mapped = mapFormalToRequirements(formal)
+      if (!mapped.length) {
+        throw new Error('No requirements were extracted — try a more detailed brief.')
+      }
+      setRequirements(mapped)
+      setScreen('requirements')
+    } catch (err) {
+      setError(String((err && err.message) || err))
+      setScreen('prompt')
+    }
+  }
+
+  const handleStageClick = (targetScreen) => {
+    if (!targetScreen || screen === 'analyzing') return
+    setScreen(targetScreen)
+  }
+
+  const handleStarter = (key) => {
+    if (STARTERS[key]) setBrief(STARTERS[key])
+  }
+
+  const handleNewBoard = () => {
+    clearTimeout(analyzeRef.current)
+    clearTimeout(validateRef.current)
+    setBrief('')
+    setFilter('all')
+    setCategory('all')
+    setValidated(false)
+    setAppliedFixes({})
+    setReportDownloaded(false)
+    setRequirements([])
+    setChecks([])
+    setProjectId(null)
+    setError(null)
+    setScreen('prompt')
+  }
+
+  const handleSelectSource = (key) => {
+    setDesignSource(key)
+    setDesignText(key === 'ai' ? CANDIDATE_DESIGN : '')
+    setValidated(false)
+  }
+
+  const handleRunValidation = async () => {
+    if (!projectId) {
+      setError('Analyze a board first so there is a spec to validate against.')
+      return
+    }
+    setError(null)
+    setValidated(false)
+    setValidating(true)
+    try {
+      // "Paste JSON" sends the artifact; other sources fall back to validating
+      // the AI-synthesized candidate (BOM/KiCad parsing is a follow-up).
+      let body
+      if (designSource === 'json' && designText.trim()) {
+        try {
+          body = { artifact: JSON.parse(designText) }
+        } catch {
+          throw new Error('Design JSON is not valid — fix it or switch to the AI candidate.')
+        }
+      }
+      const val = await api.runStage(projectId, 'validation', body)
+      setChecks(mapValidationToChecks(val))
+      setValidated(true)
+    } catch (err) {
+      setError(String((err && err.message) || err))
+    } finally {
+      setValidating(false)
+    }
+  }
+
+  // Pull AI fix suggestions for the failing/needs-review checks, then advance.
+  const handleRemediate = async () => {
+    const open = checks.filter((c) => c.status !== 'pass')
+    if (!open.length) {
+      setScreen('report')
+      return
+    }
+    try {
+      const rem = await api.runStage(projectId, 'remediation')
+      const fixById = {}
+      ;(rem.fixes || []).forEach((f) => {
+        fixById[f.req_id] = f.suggestion
+      })
+      setChecks((current) =>
+        current.map((c) => (fixById[c.id] ? { ...c, fix: fixById[c.id] } : c))
+      )
+    } catch (err) {
+      // Non-fatal: still show the issues, just without AI suggestions.
+      setError(String((err && err.message) || err))
+    }
+    setScreen('remediation')
+  }
+
+  const handleApplyFix = (id) => {
+    setAppliedFixes((current) => ({ ...current, [id]: !current[id] }))
+  }
+
+  const handleDownloadReport = () => {
+    try {
+      const blob = new Blob([reportMarkdown], { type: 'text/markdown' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = 'rev-c-power-mux.validation.md'
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      URL.revokeObjectURL(url)
+      setReportDownloaded(true)
+      clearTimeout(timeoutRef.current)
+      timeoutRef.current = setTimeout(() => setReportDownloaded(false), 1800)
+    } catch {
+      // ignore download failure
+    }
+  }
+
+  const total = requirements.length
+  const statedCount = requirements.filter((r) => r.kind === 'stated').length
+  const inferredCount = total - statedCount
+  const averageConfidence = total
+    ? requirements.reduce((acc, req) => acc + req.conf, 0) / total
+    : 0
+  const overallPct = `${Math.round(averageConfidence * 100)}%`
+  const overallBar = {
+    width: `${Math.round(averageConfidence * 100)}%`,
+    background: getConfidenceColor(averageConfidence),
+  }
+  const summarySub = `${total} extracted · ${statedCount} stated · ${inferredCount} inferred`
+
+  const assumptions = requirements
+    .filter((r) => r.kind === 'inferred')
+    .slice(0, 6)
+    .map((r) => ({ text: r.title, tag: r.id }))
+
+  const activeFilters = [
+    { key: 'all', text: `All ${total}` },
+    { key: 'stated', text: `Stated ${statedCount}` },
+    { key: 'inferred', text: `Inferred ${inferredCount}` },
+  ]
+
+  const categoryChips = [
+    { key: 'all', text: `All ${total}` },
+    ...CATEGORY_ORDER.map((key) => ({
+      key,
+      text: `${CATEGORY_LABELS[key]} ${requirements.filter((r) => r.cat === key).length}`,
+    })),
+  ]
+
+  const filteredRequirements = requirements.filter((req) => {
+    if (filter !== 'all' && req.kind !== filter) return false
+    if (category !== 'all' && req.cat !== category) return false
+    return true
+  })
+
+  const groups = useMemo(() => {
+    const grouped = []
+    const categories = category === 'all' ? CATEGORY_ORDER : [category]
+    categories.forEach((cat) => {
+      const items = filteredRequirements.filter((req) => req.cat === cat)
+      if (items.length === 0) return
+      grouped.push({
+        label: CATEGORY_LABELS[cat],
+        count: items.length,
+        items,
+      })
+    })
+    return grouped
+  }, [category, filteredRequirements])
+
+  const spec = useMemo(() => buildFormalSpec(requirements), [requirements])
+  const jsonText = useMemo(() => JSON.stringify(spec, null, 2), [spec])
+
+  const passCount = checks.filter((c) => c.status === 'pass').length
+  const warnCount = checks.filter((c) => c.status === 'warn').length
+  const failCount = checks.filter((c) => c.status === 'fail').length
+  const issues = checks.filter((c) => c.status !== 'pass')
+  const resolvedCount = issues.filter((c) => appliedFixes[c.id]).length
+  const verdict =
+    failCount > 0 ? 'failed' : warnCount > 0 ? 'passed-warn' : 'passed'
+
+  const reportMarkdown = useMemo(
+    () => buildReport(requirements, checks, appliedFixes),
+    [requirements, checks, appliedFixes]
   )
-}
 
-function StatusDot({ status }) {
-  return <span className={`status-dot status-${status}`} aria-label={status} />
-}
+  const copyJson = async () => {
+    try {
+      await navigator.clipboard.writeText(jsonText)
+      setCopied(true)
+      clearTimeout(timeoutRef.current)
+      timeoutRef.current = setTimeout(() => setCopied(false), 1600)
+    } catch {
+      // ignore clipboard failure
+    }
+  }
 
-function Spinner() {
-  return <span className="spinner" aria-label="Running" />
-}
+  const handleToggleKind = (id) => {
+    setRequirements((current) =>
+      current.map((req) => {
+        if (req.id !== id) return req
+        if (req.kind === 'stated') {
+          return { ...req, kind: 'inferred', conf: Math.max(0.5, req.conf - 0.2) }
+        }
+        return { ...req, kind: 'stated', conf: Math.min(0.99, req.conf + 0.2) }
+      })
+    )
+  }
 
-function ErrorBanner({ message, onDismiss }) {
+  const handleValueChange = (id, value) => {
+    setRequirements((current) => current.map((req) => (req.id === id ? { ...req, value } : req)))
+  }
+
+  const footerNote = formalized
+    ? 'Specification formalized · ready for export'
+    : 'Regenerated live from current requirements'
+
   return (
-    <div className="error-banner" role="alert">
-      <span className="error-icon">!</span>
-      <span className="error-text">{message}</span>
-      {onDismiss && (
-        <button className="error-dismiss" onClick={onDismiss} aria-label="Dismiss error">
-          ×
-        </button>
-      )}
-    </div>
-  )
-}
+    <div className="app">
+      <div className="bg-layer" aria-hidden="true">
+        <div className="bg-blob bg-blob--1" />
+        <div className="bg-blob bg-blob--2" />
+        <div className="bg-blob bg-blob--3" />
+        <div className="bg-blob bg-blob--4" />
+        <div className="bg-blob bg-blob--5" />
+        <div className="bg-streak" />
+      </div>
 
-// ── Stage rail ───────────────────────────────────────────────────────────────
+      <header className="topbar">
+        <div className="brand-row">
+          <div className="brand-mark">T</div>
+          <div className="brand-wordmark">TRACER</div>
+          <div className="brand-chip">v0.4</div>
+        </div>
 
-function StageRail({ stages, activeStageKey, onSelectStage, isMobile }) {
-  return (
-    <nav className={`stage-rail ${isMobile ? 'stage-rail--mobile' : ''}`} aria-label="Pipeline stages">
-      {STAGES.map((stageDef, idx) => {
-        const stage = stages.find((s) => s.stage_type === stageDef.key)
-        const status = stage?.status ?? 'pending'
-        const isActive = stageDef.key === activeStageKey
-        const isClickable = !!stage
+        <div className="project-row">
+          <span className="project-label">PROJECT</span>
+          <span className="project-name">rev-c-power-mux</span>
+          <span className="project-chip">REV C</span>
+        </div>
 
-        return (
-          <div key={stageDef.key} className="rail-item-wrapper">
-            {idx > 0 && <div className={`rail-trace ${status !== 'pending' ? 'rail-trace--lit' : ''}`} aria-hidden="true" />}
-            <button
-              className={`rail-node ${isActive ? 'rail-node--active' : ''} ${isClickable ? 'rail-node--clickable' : ''}`}
-              onClick={() => isClickable && onSelectStage(stageDef.key)}
-              disabled={!isClickable}
-              aria-current={isActive ? 'step' : undefined}
-            >
-              <div className="rail-node-circle">
-                {status === 'running' ? (
-                  <Spinner />
-                ) : status === 'complete' ? (
-                  <span className="rail-check" aria-hidden="true">✓</span>
-                ) : status === 'failed' ? (
-                  <span className="rail-fail" aria-hidden="true">✕</span>
-                ) : (
-                  <span className="rail-index" aria-hidden="true">{idx + 1}</span>
-                )}
-              </div>
-              <div className="rail-node-label">
-                <span className="rail-label-main">{isMobile ? stageDef.shortLabel : stageDef.label}</span>
-                {!isMobile && <span className="rail-label-sub">{stageDef.description}</span>}
-              </div>
+        <div className="status-pill">
+          <span className="status-dot" />
+          <span className="status-text">{statusText}</span>
+        </div>
+
+        <div className="spacer" />
+
+        {screen === 'requirements' && (
+          <>
+            <button className="btn btn-ghost" onClick={copyJson}>
+              {copied ? 'Copied ✓' : 'Export JSON'}
             </button>
-          </div>
-        )
-      })}
-    </nav>
-  )
-}
-
-// ── Stage 1: Intent Expansion ────────────────────────────────────────────────
-
-function IntentExpansionOutput({ output, onEdit }) {
-  const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState('')
-  const textareaRef = useRef(null)
-
-  function startEdit() {
-    setDraft(JSON.stringify(output, null, 2))
-    setEditing(true)
-  }
-
-  function handleSave() {
-    try {
-      const parsed = JSON.parse(draft)
-      onEdit(parsed)
-      setEditing(false)
-    } catch {
-      // keep editing — parse error
-    }
-  }
-
-  useEffect(() => {
-    if (editing && textareaRef.current) textareaRef.current.focus()
-  }, [editing])
-
-  if (editing) {
-    return (
-      <div className="edit-block">
-        <label className="edit-label" htmlFor="intent-edit">
-          Edit analysis output (JSON)
-        </label>
-        <textarea
-          id="intent-edit"
-          ref={textareaRef}
-          className="edit-textarea mono"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          rows={20}
-          spellCheck={false}
-        />
-        <div className="edit-actions">
-          <button className="btn btn--primary" onClick={handleSave}>
-            Save changes
-          </button>
-          <button className="btn btn--ghost" onClick={() => setEditing(false)}>
-            Cancel
-          </button>
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div className="stage-output">
-      <div className="output-field">
-        <h3 className="output-field-label">Restated goal</h3>
-        <p className="output-prose">{output.restated_goal}</p>
-      </div>
-      <div className="output-field">
-        <h3 className="output-field-label">Functional description</h3>
-        <p className="output-prose">{output.functional_description}</p>
-      </div>
-      <div className="output-field">
-        <h3 className="output-field-label">Inferred context</h3>
-        <p className="output-prose">{output.inferred_context}</p>
-      </div>
-      {output.open_questions?.length > 0 && (
-        <div className="output-field">
-          <h3 className="output-field-label output-field-label--warn">
-            Open questions
-            <span className="flag-count">{output.open_questions.length}</span>
-          </h3>
-          <ul className="open-questions">
-            {output.open_questions.map((q, i) => (
-              <li key={i} className="open-question">
-                <span className="question-bullet" aria-hidden="true">?</span>
-                <span>{q}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      <div className="output-actions">
-        <button className="btn btn--ghost btn--sm" onClick={startEdit}>
-          Edit assumptions
-        </button>
-      </div>
-    </div>
-  )
-}
-
-// ── Stage 2: Structured Bullets ──────────────────────────────────────────────
-
-function StructuredBulletsOutput({ output, onEdit }) {
-  const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState('')
-  const textareaRef = useRef(null)
-
-  function startEdit() {
-    setDraft(JSON.stringify(output, null, 2))
-    setEditing(true)
-  }
-
-  function handleSave() {
-    try {
-      const parsed = JSON.parse(draft)
-      onEdit(parsed)
-      setEditing(false)
-    } catch {
-      // keep editing
-    }
-  }
-
-  useEffect(() => {
-    if (editing && textareaRef.current) textareaRef.current.focus()
-  }, [editing])
-
-  if (editing) {
-    return (
-      <div className="edit-block">
-        <label className="edit-label" htmlFor="bullets-edit">
-          Edit structured requirements (JSON)
-        </label>
-        <textarea
-          id="bullets-edit"
-          ref={textareaRef}
-          className="edit-textarea mono"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          rows={24}
-          spellCheck={false}
-        />
-        <div className="edit-actions">
-          <button className="btn btn--primary" onClick={handleSave}>
-            Save changes
-          </button>
-          <button className="btn btn--ghost" onClick={() => setEditing(false)}>
-            Cancel
-          </button>
-        </div>
-      </div>
-    )
-  }
-
-  const grouped = {}
-  for (const bullet of output.bullets ?? []) {
-    const cat = bullet.category ?? 'other'
-    if (!grouped[cat]) grouped[cat] = []
-    grouped[cat].push(bullet)
-  }
-
-  return (
-    <div className="stage-output">
-      {Object.entries(grouped).map(([category, bullets]) => (
-        <div key={category} className="bullet-category">
-          <h3 className="bullet-category-label">{CATEGORY_LABELS[category] ?? category}</h3>
-          <ul className="bullet-list">
-            {bullets.map((b, i) => (
-              <li key={i} className="bullet-item">
-                <div className="bullet-header">
-                  <ProvenanceTag provenance={b.provenance} />
-                  <span className="bullet-text">{b.text}</span>
-                </div>
-                {b.rationale && (
-                  <p className="bullet-rationale">
-                    <span className="rationale-label">AI reasoning:</span> {b.rationale}
-                  </p>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      ))}
-      <div className="output-actions">
-        <button className="btn btn--ghost btn--sm" onClick={startEdit}>
-          Edit requirements
-        </button>
-      </div>
-    </div>
-  )
-}
-
-// ── Stage 3: Formal Requirements ─────────────────────────────────────────────
-
-function FormalRequirementsOutput({ output, onEdit }) {
-  const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState('')
-  const textareaRef = useRef(null)
-
-  function startEdit() {
-    setDraft(JSON.stringify(output, null, 2))
-    setEditing(true)
-  }
-
-  function handleSave() {
-    try {
-      const parsed = JSON.parse(draft)
-      onEdit(parsed)
-      setEditing(false)
-    } catch {
-      // keep editing
-    }
-  }
-
-  useEffect(() => {
-    if (editing && textareaRef.current) textareaRef.current.focus()
-  }, [editing])
-
-  if (editing) {
-    return (
-      <div className="edit-block">
-        <label className="edit-label" htmlFor="formal-edit">
-          Edit formal specification (JSON)
-        </label>
-        <textarea
-          id="formal-edit"
-          ref={textareaRef}
-          className="edit-textarea mono"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          rows={28}
-          spellCheck={false}
-        />
-        <div className="edit-actions">
-          <button className="btn btn--primary" onClick={handleSave}>
-            Save changes
-          </button>
-          <button className="btn btn--ghost" onClick={() => setEditing(false)}>
-            Cancel
-          </button>
-        </div>
-      </div>
-    )
-  }
-
-  const grouped = {}
-  for (const req of output.requirements ?? []) {
-    const cat = req.category ?? 'other'
-    if (!grouped[cat]) grouped[cat] = []
-    grouped[cat].push(req)
-  }
-
-  return (
-    <div className="stage-output">
-      {Object.entries(grouped).map(([category, reqs]) => (
-        <div key={category} className="req-category">
-          <h3 className="bullet-category-label">{CATEGORY_LABELS[category] ?? category}</h3>
-          {reqs.map((req) => (
-            <div key={req.id} className="req-card">
-              <div className="req-card-header">
-                <span className="mono req-id">{req.id}</span>
-                <ProvenanceTag provenance={req.provenance} />
-              </div>
-              <p className="req-statement">{req.statement}</p>
-              {(req.parameter || req.value != null) && (
-                <div className="req-spec-row">
-                  {req.parameter && <span className="mono req-spec-part">{req.parameter}</span>}
-                  {req.operator && <span className="mono req-spec-op">{req.operator}</span>}
-                  {req.value != null && <span className="mono req-spec-part">{req.value}</span>}
-                  {req.unit && <span className="mono req-spec-unit">{req.unit}</span>}
-                </div>
-              )}
-              {req.verification_method && (
-                <div className="req-verify">
-                  <span className="req-verify-label">Verify by:</span>
-                  <span className="mono">{req.verification_method}</span>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      ))}
-      <div className="output-actions">
-        <button className="btn btn--ghost btn--sm" onClick={startEdit}>
-          Edit specification
-        </button>
-      </div>
-    </div>
-  )
-}
-
-// ── Stage 4: Validation ──────────────────────────────────────────────────────
-
-function VerdictBadge({ verdict }) {
-  return (
-    <span className={`verdict-badge verdict-badge--${verdict}`}>
-      {VERDICT_LABEL[verdict] ?? verdict}
-    </span>
-  )
-}
-
-function ValidationOutput({ output, onEdit }) {
-  const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState('')
-  const textareaRef = useRef(null)
-
-  function startEdit() {
-    setDraft(JSON.stringify(output, null, 2))
-    setEditing(true)
-  }
-
-  function handleSave() {
-    try {
-      onEdit(JSON.parse(draft))
-      setEditing(false)
-    } catch {
-      // keep editing — parse error
-    }
-  }
-
-  useEffect(() => {
-    if (editing && textareaRef.current) textareaRef.current.focus()
-  }, [editing])
-
-  if (editing) {
-    return (
-      <div className="edit-block">
-        <label className="edit-label" htmlFor="validation-edit">
-          Edit validation output (JSON)
-        </label>
-        <textarea
-          id="validation-edit"
-          ref={textareaRef}
-          className="edit-textarea mono"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          rows={28}
-          spellCheck={false}
-        />
-        <div className="edit-actions">
-          <button className="btn btn--primary" onClick={handleSave}>
-            Save changes
-          </button>
-          <button className="btn btn--ghost" onClick={() => setEditing(false)}>
-            Cancel
-          </button>
-        </div>
-      </div>
-    )
-  }
-
-  const summary = output.summary ?? { pass: 0, fail: 0, needs_review: 0, total: 0 }
-  const results = output.results ?? []
-  const design = output.design ?? null
-  const keyParameters = design?.key_parameters ?? []
-  const source = output.source ?? 'ai_candidate'
-  const fromArtifact = source === 'uploaded_artifact'
-
-  return (
-    <div className="stage-output">
-      <div className="validation-summary">
-        <span className="vsum-chip vsum-chip--pass">{summary.pass} pass</span>
-        <span className="vsum-chip vsum-chip--fail">{summary.fail} fail</span>
-        <span className="vsum-chip vsum-chip--review">{summary.needs_review} review</span>
-        {summary.flagged > 0 && (
-          <span className="vsum-chip vsum-chip--flagged">{summary.flagged} flagged</span>
+            <button className="btn btn-primary" onClick={() => setScreen('validation')}>
+              Validate design →
+            </button>
+          </>
         )}
-        <span className="vsum-total">of {summary.total} requirements</span>
-        <span className={`vsource vsource--${source}`}>
-          {fromArtifact ? '✓ validated your artifact' : 'AI candidate'}
-        </span>
-      </div>
 
-      {design && (
-        <div className="output-field">
-          <h3 className="output-field-label">
-            {fromArtifact ? 'Your design artifact' : 'Candidate design (AI-generated)'}
-          </h3>
-          <p className="output-prose">{design.summary}</p>
-          {design.components?.length > 0 && (
-            <ul className="design-comp-list">
-              {design.components.map((c, i) => (
-                <li key={i} className="design-comp">
-                  <span className="mono req-id">{c.ref}</span>
-                  <span className="design-comp-part">{c.part}</span>
-                  {c.rationale && <span className="design-comp-rationale">{c.rationale}</span>}
-                </li>
-              ))}
-            </ul>
-          )}
-          {design.nets?.length > 0 && (
-            <ul className="design-comp-list">
-              {design.nets.map((n, i) => (
-                <li key={`net-${i}`} className="design-comp">
-                  <span className="mono req-id">{n.name}</span>
-                  <span className="design-comp-rationale">{(n.pins ?? []).join(', ')}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-          {keyParameters.length > 0 && (
-            <div className="design-param-grid">
-              {keyParameters.map((p, i) => (
-                <div key={`${p.name}-${i}`} className="design-param">
-                  <span className="design-param-name">{p.name}</span>
-                  <span className="mono design-param-value">
-                    {p.value}{p.unit ? ` ${p.unit}` : ''}
-                  </span>
-                  {p.rationale && <span className="design-param-rationale">{p.rationale}</span>}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+        {screen === 'validation' && (
+          <>
+            <button className="btn btn-ghost" onClick={() => setScreen('requirements')}>
+              ← Requirements
+            </button>
+            {validated && (
+              <button className="btn btn-primary" onClick={handleRemediate}>
+                {issues.length ? 'Remediate →' : 'Export report →'}
+              </button>
+            )}
+          </>
+        )}
 
-      <div className="output-field">
-        <h3 className="output-field-label">Requirement checks</h3>
-        {results.length === 0 && <p className="output-prose">No requirement checks returned.</p>}
-        {results.map((r, i) => {
-          const method = r.method ?? 'judgment'
+        {screen === 'remediation' && (
+          <>
+            <button className="btn btn-ghost" onClick={() => setScreen('validation')}>
+              ← Validation
+            </button>
+            <button className="btn btn-primary" onClick={() => setScreen('report')}>
+              Export report →
+            </button>
+          </>
+        )}
+
+        {screen === 'report' && (
+          <>
+            <button className="btn btn-ghost" onClick={() => setScreen('remediation')}>
+              ← Remediation
+            </button>
+            <button className="btn btn-primary" onClick={handleDownloadReport}>
+              {reportDownloaded ? 'Downloaded ✓' : 'Download .md'}
+            </button>
+          </>
+        )}
+      </header>
+
+      <div className="stage-strip">
+        {STAGE_DEFS.map((stageDef, index) => {
+          const isActive = index + 1 === stage
+          const isDone = index + 1 < stage
+          const isPending = index + 1 > stage
+          const isNavigable = Boolean(stageDef.screen) && screen !== 'analyzing'
           return (
-            <div key={r.req_id ?? i} className="req-card">
-              <div className="req-card-header">
-                <span className="mono req-id">{r.req_id}</span>
-                <VerdictBadge verdict={r.verdict} />
-                <span className={`method-tag method-tag--${method}`}>
-                  {METHOD_LABEL[method] ?? method}
-                </span>
-              </div>
-              <p className="req-statement">{r.statement}</p>
-              <div className="check-compare">
-                {(r.parameter || r.value != null) && (
-                  <span className="check-expected">
-                    expected{' '}
-                    <span className="mono">
-                      {r.parameter ? `${r.parameter} ` : ''}
-                      {r.operator} {r.value}
-                      {r.unit ? ` ${r.unit}` : ''}
-                    </span>
+            <div key={stageDef.num} className="stage-item">
+              <div
+                className={`stage-item-inner ${isNavigable ? 'stage-item-inner--clickable' : ''}`}
+                onClick={() => handleStageClick(stageDef.screen)}
+              >
+                <div
+                  className={`stage-dot ${isActive ? 'stage-dot--active' : ''} ${
+                    isDone ? 'stage-dot--done' : ''
+                  } ${isPending ? 'stage-dot--pending' : ''}`}
+                >
+                  {isDone ? '✓' : stageDef.num}
+                </div>
+                <div className="stage-labels">
+                  <span className="stage-pretitle">STAGE {stageDef.num}</span>
+                  <span className={`stage-title ${isActive ? 'stage-title--active' : ''}`}>
+                    {stageDef.label}
                   </span>
-                )}
-                {r.design_value != null && (
-                  <span className="check-actual">
-                    design <span className="mono">{r.design_value}</span>
-                  </span>
-                )}
+                </div>
               </div>
-              {r.rationale && <p className="check-rationale">{r.rationale}</p>}
-              {r.flagged_refs?.length > 0 && (
-                <p className="check-flagged">
-                  ⚠ references not in the design: {r.flagged_refs.join(', ')}
-                </p>
-              )}
+              {index < STAGE_DEFS.length - 1 && <span className="stage-separator">→</span>}
             </div>
           )
         })}
       </div>
 
-      <div className="output-actions">
-        <button className="btn btn--ghost btn--sm" onClick={startEdit}>
-          Edit results
-        </button>
-      </div>
-    </div>
-  )
-}
-
-// ── Design artifact input (Stage 4 — validate a real design) ─────────────────
-
-function parseCsvLine(line) {
-  const out = []
-  let cur = ''
-  let inQuotes = false
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i]
-    if (inQuotes) {
-      if (ch === '"' && line[i + 1] === '"') {
-        cur += '"'
-        i++
-      } else if (ch === '"') {
-        inQuotes = false
-      } else {
-        cur += ch
-      }
-    } else if (ch === '"') {
-      inQuotes = true
-    } else if (ch === ',') {
-      out.push(cur)
-      cur = ''
-    } else {
-      cur += ch
-    }
-  }
-  out.push(cur)
-  return out.map((s) => s.trim())
-}
-
-// Convert a pasted BOM CSV (header row + rows) into the artifact shape.
-function parseBomCsv(text) {
-  const lines = text.split(/\r?\n/).filter((l) => l.trim())
-  if (lines.length < 2) return null
-  const header = parseCsvLine(lines[0]).map((h) => h.toLowerCase())
-  const find = (...names) => header.findIndex((h) => names.some((n) => h.includes(n)))
-  const refCol = find('refdes', 'reference', 'designator', 'ref')
-  const partCol = find('mpn', 'manufacturer part', 'part number', 'part', 'comment', 'description')
-  const valCol = find('value', 'val')
-  if (refCol === -1) return null
-  const components = []
-  for (let i = 1; i < lines.length; i++) {
-    const cells = parseCsvLine(lines[i])
-    const refsCell = cells[refCol] ?? ''
-    if (!refsCell) continue
-    const part = (partCol !== -1 ? cells[partCol] : '') || ''
-    const value = (valCol !== -1 ? cells[valCol] : '') || ''
-    for (const ref of refsCell.split(/[,;\s]+/).filter(Boolean)) {
-      const comp = { ref, part }
-      if (value) comp.values = { value }
-      components.push(comp)
-    }
-  }
-  if (!components.length) return null
-  return { components, nets: [], parameters: {} }
-}
-
-// ── KiCad netlist (S-expression) import ──────────────────────────────────────
-function tokenizeSexpr(text) {
-  const tokens = []
-  let i = 0
-  while (i < text.length) {
-    const ch = text[i]
-    if (ch === '(' || ch === ')') {
-      tokens.push(ch)
-      i++
-    } else if (ch === '"') {
-      i++
-      let s = ''
-      while (i < text.length && text[i] !== '"') {
-        if (text[i] === '\\' && i + 1 < text.length) i++
-        s += text[i]
-        i++
-      }
-      i++
-      tokens.push({ s })
-    } else if (/\s/.test(ch)) {
-      i++
-    } else {
-      let a = ''
-      while (i < text.length && !/[\s()"]/.test(text[i])) {
-        a += text[i]
-        i++
-      }
-      tokens.push({ a })
-    }
-  }
-  return tokens
-}
-
-function sexprTree(tokens) {
-  let i = 0
-  function build() {
-    const arr = []
-    while (i < tokens.length) {
-      const t = tokens[i++]
-      if (t === '(') arr.push(build())
-      else if (t === ')') return arr
-      else arr.push(t)
-    }
-    return arr
-  }
-  while (i < tokens.length && tokens[i] !== '(') i++
-  if (i >= tokens.length) return null
-  i++
-  return build()
-}
-
-// Parse a standard KiCad netlist export into the artifact shape.
-function parseKicadNetlist(text) {
-  const tree = sexprTree(tokenizeSexpr(text))
-  if (!tree || tree[0]?.a !== 'export') return null
-  const head = (node, name) => node.find((x) => Array.isArray(x) && x[0]?.a === name)
-  const val = (node, key) => {
-    const v = head(node, key)?.[1]
-    return v?.s ?? v?.a ?? ''
-  }
-  const compsNode = head(tree, 'components')
-  const netsNode = head(tree, 'nets')
-
-  const components = []
-  for (const comp of compsNode?.filter((x) => Array.isArray(x) && x[0]?.a === 'comp') ?? []) {
-    const ref = val(comp, 'ref')
-    const value = val(comp, 'value')
-    if (!ref) continue
-    const c = { ref, part: value }
-    if (value) c.values = { value }
-    components.push(c)
-  }
-
-  const nets = []
-  for (const net of netsNode?.filter((x) => Array.isArray(x) && x[0]?.a === 'net') ?? []) {
-    const name = val(net, 'name')
-    const pins = []
-    for (const node of net.filter((x) => Array.isArray(x) && x[0]?.a === 'node')) {
-      const ref = val(node, 'ref')
-      const pin = val(node, 'pin')
-      if (ref) pins.push(pin ? `${ref}.${pin}` : ref)
-    }
-    if (name) nets.push({ name, pins })
-  }
-
-  if (!components.length && !nets.length) return null
-  return { components, nets, parameters: {} }
-}
-
-function ArtifactInput({ value, onChange, candidate }) {
-  const [csv, setCsv] = useState('')
-  const [bomError, setBomError] = useState(null)
-  const [netlist, setNetlist] = useState('')
-  const [netError, setNetError] = useState(null)
-
-  function importBom() {
-    const parsed = parseBomCsv(csv)
-    if (!parsed) {
-      setBomError('Could not parse — need a header row with a Reference column.')
-      return
-    }
-    setBomError(null)
-    onChange(JSON.stringify(parsed, null, 2))
-  }
-
-  function importKicad() {
-    const parsed = parseKicadNetlist(netlist)
-    if (!parsed) {
-      setNetError('Could not parse — expecting a standard KiCad netlist (an (export …) S-expression).')
-      return
-    }
-    setNetError(null)
-    onChange(JSON.stringify(parsed, null, 2))
-  }
-
-  function fillFromCandidate() {
-    if (!candidate) return
-    const artifact = {
-      components: (candidate.components ?? []).map((c) => ({
-        ref: c.ref,
-        part: c.part,
-        values: {},
-      })),
-      nets: candidate.nets ?? [],
-      parameters: Object.fromEntries(
-        (candidate.key_parameters ?? []).map((p) => [
-          p.name,
-          [p.value, p.unit].filter(Boolean).join(' '),
-        ]),
-      ),
-    }
-    onChange(JSON.stringify(artifact, null, 2))
-  }
-
-  return (
-    <div className="artifact-input">
-      <div className="artifact-input-head">
-        <span className="output-field-label">
-          Design to validate <span className="artifact-optional">— optional</span>
-        </span>
-        {candidate?.components?.length > 0 && (
-          <button type="button" className="artifact-fill" onClick={fillFromCandidate}>
-            Fill from AI candidate
-          </button>
-        )}
-      </div>
-      <p className="artifact-hint">
-        Paste your board design as JSON to validate it. Leave blank to validate an AI-generated candidate.
-      </p>
-      <textarea
-        className="edit-textarea mono"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        rows={8}
-        spellCheck={false}
-        placeholder={ARTIFACT_PLACEHOLDER}
-      />
-      <details className="bom-import">
-        <summary>Import a BOM (CSV)</summary>
-        <p className="artifact-hint">
-          Paste a BOM with a header row (e.g. Reference, Value, Part). Cells like
-          &quot;C1, C2, C3&quot; are expanded into separate components.
-        </p>
-        <textarea
-          className="edit-textarea mono"
-          value={csv}
-          onChange={(e) => setCsv(e.target.value)}
-          rows={5}
-          spellCheck={false}
-          placeholder={'Reference,Value,Part\nU1,,ESP32-C3\nC1,10uF,GRM188R61A106'}
-        />
-        <button type="button" className="artifact-fill" onClick={importBom}>
-          Convert to artifact
-        </button>
-        {bomError && <p className="check-flagged">{bomError}</p>}
-      </details>
-      <details className="bom-import">
-        <summary>Import a KiCad netlist (.net)</summary>
-        <p className="artifact-hint">
-          Paste a standard KiCad netlist export (an <code>(export …)</code> S-expression).
-          Components and nets are extracted.
-        </p>
-        <textarea
-          className="edit-textarea mono"
-          value={netlist}
-          onChange={(e) => setNetlist(e.target.value)}
-          rows={5}
-          spellCheck={false}
-          placeholder={'(export (version "E")\n  (components (comp (ref "U1") (value "ESP32-C3")))\n  (nets (net (name "3V3") (node (ref "U1") (pin "1")))))'}
-        />
-        <button type="button" className="artifact-fill" onClick={importKicad}>
-          Convert to artifact
-        </button>
-        {netError && <p className="check-flagged">{netError}</p>}
-      </details>
-    </div>
-  )
-}
-
-// ── Stage 5: Remediation ─────────────────────────────────────────────────────
-
-function RemediationOutput({ output }) {
-  const fixes = output.fixes ?? []
-  if (output.all_clear || fixes.length === 0) {
-    return (
-      <div className="stage-output">
-        <p className="remediation-clear">✓ All requirements satisfied — nothing to remediate.</p>
-      </div>
-    )
-  }
-  return (
-    <div className="stage-output">
-      <p className="output-prose">
-        {fixes.length} requirement{fixes.length === 1 ? '' : 's'} need changes:
-      </p>
-      {fixes.map((f, i) => (
-        <div key={f.req_id ?? i} className="req-card">
-          <div className="req-card-header">
-            <span className="mono req-id">{f.req_id}</span>
-            {f.change_type && (
-              <span className="fix-type">{f.change_type.replace(/_/g, ' ')}</span>
-            )}
-          </div>
-          {f.issue && <p className="check-rationale">{f.issue}</p>}
-          {f.suggestion && <p className="fix-suggestion">→ {f.suggestion}</p>}
-        </div>
-      ))}
-    </div>
-  )
-}
-
-// ── Stage panel ──────────────────────────────────────────────────────────────
-
-function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise, persistedArtifact }) {
-  const [running, setRunning] = useState(false)
-  const [error, setError] = useState(null)
-  const [savingRevision, setSavingRevision] = useState(false)
-  const [revisionSaved, setRevisionSaved] = useState(false)
-  const [artifact, setArtifact] = useState(
-    persistedArtifact ? JSON.stringify(persistedArtifact, null, 2) : '',
-  )
-  const pendingEditRef = useRef(null)
-
-  const status = stage?.status ?? 'pending'
-  const output = stage?.output_json ?? null
-  const stageError = stage?.error ?? null
-
-  async function runStage() {
-    setError(null)
-    let body
-    if (stageDef.key === 'validation') {
-      const trimmed = artifact.trim()
-      if (trimmed) {
-        try {
-          body = { artifact: JSON.parse(trimmed) }
-        } catch {
-          setError('Design artifact must be valid JSON — fix it or clear the box to use an AI candidate.')
-          return
-        }
-      } else {
-        body = {} // no artifact → validate an AI-generated candidate
-      }
-    }
-    setRunning(true)
-    try {
-      if (stageDef.key === 'validation' && body?.artifact) {
-        await api.saveArtifact(projectId, body.artifact) // persist as a design_artifact stage
-      }
-      const result = await api.runStage(projectId, STAGE_ENDPOINT[stageDef.key], body)
-      onStageComplete(stageDef.key, result)
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setRunning(false)
-    }
-  }
-
-  async function handleEdit(editedOutput) {
-    if (!stage?.id) {
-      // stage not saved yet — shouldn't happen, but guard anyway
-      return
-    }
-    pendingEditRef.current = editedOutput
-    setSavingRevision(true)
-    setRevisionSaved(false)
-    try {
-      await api.revise(stage.id, editedOutput, 'User override via UI')
-      onRevise(stageDef.key, editedOutput)
-      setRevisionSaved(true)
-      setTimeout(() => setRevisionSaved(false), 3000)
-    } catch (err) {
-      setError(`Could not save revision: ${err.message}`)
-    } finally {
-      setSavingRevision(false)
-    }
-  }
-
-  const isRunning = status === 'running' || running
-  const canRun = status === 'pending' || status === 'failed' || status === 'complete'
-  const runLabel =
-    stageDef.key === 'validation' ? 'Run validation'
-    : stageDef.key === 'remediation' ? 'Suggest fixes'
-    : 'Run analysis'
-  const rerunLabel =
-    stageDef.key === 'validation' ? 'Re-run validation'
-    : stageDef.key === 'remediation' ? 'Re-run' : 'Re-run analysis'
-  const runningLabel =
-    stageDef.key === 'validation' ? 'Validating'
-    : stageDef.key === 'remediation' ? 'Generating fixes' : 'Analysing'
-
-  return (
-    <section className="stage-panel" aria-label={stageDef.label}>
-      <div className="stage-panel-header">
-        <div className="stage-panel-title-row">
-          <StatusDot status={isRunning ? 'running' : status} />
-          <h2 className="stage-panel-title">{stageDef.label}</h2>
-        </div>
-        <p className="stage-panel-desc">{stageDef.description}</p>
-      </div>
-
-      {error && <ErrorBanner message={error} onDismiss={() => setError(null)} />}
-
-      {(stageError && status === 'failed') && (
-        <ErrorBanner
-          message={`Analysis failed: ${stageError}. Check your board description and try again.`}
-        />
-      )}
-
-      {savingRevision && (
-        <div className="saving-banner">
-          <Spinner /> Saving your changes…
-        </div>
-      )}
-
-      {revisionSaved && (
-        <div className="saved-banner" role="status">
-          Changes saved — downstream stages will use your version.
-        </div>
-      )}
-
-      {stageDef.key === 'validation' && !isRunning && (
-        <ArtifactInput value={artifact} onChange={setArtifact} candidate={output?.design} />
-      )}
-
-      {status === 'pending' && !isRunning && (
-        <div className="stage-empty">
-          <div className="stage-empty-icon" aria-hidden="true">◈</div>
-          <p className="stage-empty-text">
-            {stageDef.key === 'intent_expansion'
-              ? 'Ready to analyse your board description.'
-              : stageDef.key === 'structured_bullets'
-              ? 'Complete Intent Analysis first, then run this stage.'
-              : stageDef.key === 'formal_requirements'
-              ? 'Complete Structured Requirements first, then run this stage.'
-              : stageDef.key === 'validation'
-              ? 'Complete the Formal Specification first, then run this stage.'
-              : 'Complete Validation first, then suggest fixes.'}
-          </p>
-          <button
-            className="btn btn--primary"
-            onClick={runStage}
-            disabled={isRunning}
-          >
-            {runLabel}
-          </button>
-        </div>
-      )}
-
-      {isRunning && (
-        <div className="stage-running">
-          <Spinner />
-          <p className="stage-running-text">{runningLabel} — this takes a few seconds…</p>
-        </div>
-      )}
-
-      {status === 'complete' && output && (
-        <>
-          {stageDef.key === 'intent_expansion' && (
-            <IntentExpansionOutput output={output} onEdit={handleEdit} />
-          )}
-          {stageDef.key === 'structured_bullets' && (
-            <StructuredBulletsOutput output={output} onEdit={handleEdit} />
-          )}
-          {stageDef.key === 'formal_requirements' && (
-            <FormalRequirementsOutput output={output} onEdit={handleEdit} />
-          )}
-          {stageDef.key === 'validation' && (
-            <ValidationOutput output={output} onEdit={handleEdit} />
-          )}
-          {stageDef.key === 'remediation' && <RemediationOutput output={output} />}
-          {canRun && (
-            <div className="output-actions">
-              <button className="btn btn--ghost btn--sm" onClick={runStage} disabled={isRunning}>
-                {rerunLabel}
-              </button>
-            </div>
-          )}
-        </>
-      )}
-
-      {status === 'failed' && !isRunning && (
-        <div className="output-actions" style={{ marginTop: '1rem' }}>
-          <button className="btn btn--primary" onClick={runStage}>
-            Retry
-          </button>
-        </div>
-      )}
-    </section>
-  )
-}
-
-// ── Export: assemble the full pipeline into a Markdown report ────────────────
-
-function buildReport(project) {
-  const byType = {}
-  for (const s of project.stages ?? []) {
-    if (s.status === 'complete' && s.output_json) byType[s.stage_type] = s.output_json
-  }
-  const lines = [`# Tracer Report — ${project.name || 'Untitled board'}`, '']
-  if (project.intent) lines.push(`**Board description:** ${project.intent}`, '')
-
-  const intent = byType.intent_expansion
-  if (intent) {
-    lines.push('## Intent Analysis', '')
-    if (intent.restated_goal) lines.push(`**Goal:** ${intent.restated_goal}`, '')
-    if (intent.functional_description) lines.push(`**Functional:** ${intent.functional_description}`, '')
-    if (intent.inferred_context) lines.push(`**Context:** ${intent.inferred_context}`, '')
-    if (intent.open_questions?.length) {
-      lines.push('**Open questions:**')
-      for (const q of intent.open_questions) lines.push(`- ${q}`)
-      lines.push('')
-    }
-  }
-
-  const bullets = byType.structured_bullets
-  if (bullets?.bullets?.length) {
-    lines.push('## Structured Requirements', '')
-    const grouped = {}
-    for (const b of bullets.bullets) (grouped[b.category ?? 'other'] ??= []).push(b)
-    for (const [cat, items] of Object.entries(grouped)) {
-      lines.push(`### ${CATEGORY_LABELS[cat] ?? cat}`)
-      for (const b of items) {
-        lines.push(`- _[${b.provenance === 'user_stated' ? 'stated' : 'inferred'}]_ ${b.text}`)
-      }
-      lines.push('')
-    }
-  }
-
-  const formal = byType.formal_requirements
-  if (formal?.requirements?.length) {
-    lines.push('## Formal Specification', '')
-    for (const r of formal.requirements) {
-      const constraint = r.parameter
-        ? ` \`${r.parameter} ${r.operator ?? ''} ${r.value ?? ''}${r.unit ? ' ' + r.unit : ''}\``
-        : ''
-      const verify = r.verification_method ? ` · verify: ${r.verification_method}` : ''
-      lines.push(`- **${r.id}** — ${r.statement}${constraint}${verify}`)
-    }
-    lines.push('')
-  }
-
-  const validation = byType.validation
-  if (validation?.results?.length) {
-    const s = validation.summary ?? {}
-    lines.push(`## Validation — ${s.pass ?? 0} pass / ${s.fail ?? 0} fail / ${s.needs_review ?? 0} review`, '')
-    if (validation.design?.summary) lines.push(`_Design: ${validation.design.summary}_`, '')
-    for (const r of validation.results) {
-      const dv = r.design_value ? ` — design: ${r.design_value}` : ''
-      lines.push(`- **${r.req_id}** ${(r.verdict ?? '').toUpperCase()}${dv}${r.rationale ? ` — ${r.rationale}` : ''}`)
-    }
-    lines.push('')
-  }
-
-  const remediation = byType.remediation
-  if (remediation?.fixes?.length) {
-    lines.push('## Remediation', '')
-    for (const f of remediation.fixes) {
-      lines.push(`- **${f.req_id}** [${(f.change_type ?? '').replace(/_/g, ' ')}] ${f.issue ?? ''} → ${f.suggestion ?? ''}`)
-    }
-    lines.push('')
-  } else if (remediation?.all_clear) {
-    lines.push('## Remediation', '', '✓ All requirements satisfied — nothing to remediate.', '')
-  }
-
-  return lines.join('\n')
-}
-
-function downloadReport(project) {
-  const md = buildReport(project)
-  const safe = (project.name || 'tracer-report')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
-  const blob = new Blob([md], { type: 'text/markdown' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `${safe || 'tracer-report'}.md`
-  a.click()
-  URL.revokeObjectURL(url)
-}
-
-// ── Project setup form ───────────────────────────────────────────────────────
-
-function ProjectSetup({ onCreate }) {
-  const [name, setName] = useState('')
-  const [intent, setIntent] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState(null)
-
-  async function handleSubmit(e) {
-    e.preventDefault()
-    if (!intent.trim()) return
-    setError(null)
-    setLoading(true)
-    try {
-      const { project_id } = await api.createProject(name.trim() || 'Untitled board', intent.trim())
-      onCreate(project_id, intent.trim())
-    } catch (err) {
-      setError(`Could not create project: ${err.message}. Make sure the backend is running at localhost:8000.`)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  return (
-    <div className="setup-screen">
-      <header className="setup-header">
-        <div className="wordmark">
-          <span className="wordmark-trace" aria-hidden="true">⬡</span>
-          <span className="wordmark-text">Tracer</span>
-        </div>
-        <p className="setup-tagline">Describe your board. We'll build the spec.</p>
-      </header>
-
-      <form className="setup-form" onSubmit={handleSubmit} noValidate>
-        <div className="form-field">
-          <label className="form-label" htmlFor="project-name">
-            Project name <span className="form-optional">(optional)</span>
-          </label>
-          <input
-            id="project-name"
-            className="form-input"
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. Wireless sensor node rev A"
-            autoComplete="off"
-          />
-        </div>
-
-        <div className="form-field">
-          <label className="form-label" htmlFor="board-intent">
-            Describe your board
-          </label>
-          <p className="form-hint">
-            Write naturally — what it does, who uses it, any constraints you know about. The AI will
-            infer the rest and flag its assumptions for you to review.
-          </p>
-          <textarea
-            id="board-intent"
-            className="form-textarea"
-            value={intent}
-            onChange={(e) => setIntent(e.target.value)}
-            placeholder="e.g. A battery-powered environmental monitor that reads temperature, humidity, and CO₂, then sends readings over BLE every 30 seconds. It needs to run for at least a year on two AA batteries. The enclosure is outdoor-rated IP65."
-            rows={6}
-            required
-          />
-        </div>
-
-        {error && <ErrorBanner message={error} />}
-
-        <button
-          className="btn btn--primary btn--lg"
-          type="submit"
-          disabled={loading || !intent.trim()}
-        >
-          {loading ? <><Spinner /> Starting…</> : 'Describe your board →'}
-        </button>
-      </form>
-
-      <div className="setup-legend">
-        <div className="legend-item">
-          <ProvenanceTag provenance="user_stated" />
-          <span className="legend-desc">From your description</span>
-        </div>
-        <div className="legend-item">
-          <ProvenanceTag provenance="inferred" />
-          <span className="legend-desc">AI expert inference — review these</span>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ── Root App ─────────────────────────────────────────────────────────────────
-
-export default function App() {
-  const [projectId, setProjectId] = useState(null)
-  const [project, setProject] = useState(null)
-  const [activeStageKey, setActiveStageKey] = useState('intent_expansion')
-  const [loadError, setLoadError] = useState(null)
-  const [isMobile, setIsMobile] = useState(window.innerWidth < 700)
-
-  useEffect(() => {
-    const mq = window.matchMedia('(max-width: 700px)')
-    const handler = (e) => setIsMobile(e.matches)
-    mq.addEventListener('change', handler)
-    return () => mq.removeEventListener('change', handler)
-  }, [])
-
-  const refreshProject = useCallback(async (id) => {
-    try {
-      const p = await api.getProject(id)
-      setProject(p)
-    } catch (err) {
-      setLoadError(err.message)
-    }
-  }, [])
-
-  function handleCreate(id) {
-    setProjectId(id)
-    setActiveStageKey('intent_expansion')
-    refreshProject(id)
-  }
-
-  function handleStageComplete(stageKey, result) {
-    // Merge the new stage into local project state without full refetch
-    setProject((prev) => {
-      if (!prev) return prev
-      const existing = prev.stages?.find((s) => s.stage_type === stageKey)
-      const newStage = {
-        id: result.stage_id ?? existing?.id,
-        stage_type: stageKey,
-        status: 'complete',
-        output_json: result.output ?? result,
-        error: null,
-      }
-      const stages = prev.stages
-        ? prev.stages.map((s) => (s.stage_type === stageKey ? newStage : s))
-        : [newStage]
-      if (!stages.find((s) => s.stage_type === stageKey)) stages.push(newStage)
-      return { ...prev, stages }
-    })
-  }
-
-  function handleRevise(stageKey, editedOutput) {
-    setProject((prev) => {
-      if (!prev) return prev
-      const stages = prev.stages?.map((s) =>
-        s.stage_type === stageKey ? { ...s, output_json: editedOutput } : s
-      )
-      return { ...prev, stages }
-    })
-  }
-
-  if (!projectId) {
-    return <ProjectSetup onCreate={handleCreate} />
-  }
-
-  if (!project) {
-    return (
-      <div className="loading-screen">
-        <Spinner />
-        <p>Loading project…</p>
-        {loadError && <ErrorBanner message={loadError} />}
-      </div>
-    )
-  }
-
-  const activeStageDef = STAGES.find((s) => s.key === activeStageKey)
-  const activeStageData = project.stages?.find((s) => s.stage_type === activeStageKey)
-
-  return (
-    <div className="app">
-      <header className="app-header">
-        <div className="wordmark">
-          <span className="wordmark-trace" aria-hidden="true">⬡</span>
-          <span className="wordmark-text">Tracer</span>
-        </div>
-        <div className="app-header-right">
-          <span className="project-name">{project.name ?? 'Untitled board'}</span>
-          <button
-            className="btn btn--ghost btn--sm"
-            onClick={() => downloadReport(project)}
-            disabled={!project.stages?.some((s) => s.status === 'complete')}
-          >
-            Export report
-          </button>
-          <button
-            className="btn btn--ghost btn--sm"
-            onClick={() => {
-              setProjectId(null)
-              setProject(null)
-              setActiveStageKey('intent_expansion')
-            }}
-          >
-            New project
-          </button>
-        </div>
-      </header>
-
-      <div className="app-body">
-        <StageRail
-          stages={project.stages ?? []}
-          activeStageKey={activeStageKey}
-          onSelectStage={setActiveStageKey}
-          isMobile={isMobile}
-        />
-
-        <main className="main-panel" id="main-content">
-          <StagePanel
-            key={activeStageKey}
-            stageDef={activeStageDef}
-            stage={activeStageData}
-            projectId={projectId}
-            onStageComplete={handleStageComplete}
-            onRevise={handleRevise}
-            persistedArtifact={project.stages?.find((s) => s.stage_type === 'design_artifact')?.output_json}
-          />
-
-          {/* next-stage nudge */}
-          {activeStageData?.status === 'complete' && (() => {
-            const idx = STAGES.findIndex((s) => s.key === activeStageKey)
-            const next = STAGES[idx + 1]
-            if (!next) return null
-            const nextStage = project.stages?.find((s) => s.stage_type === next.key)
-            if (nextStage?.status === 'complete') return null
-            return (
-              <div className="next-stage-nudge">
-                <span className="nudge-arrow" aria-hidden="true">↓</span>
-                <span>Ready for the next stage —</span>
-                <button
-                  className="nudge-link"
-                  onClick={() => setActiveStageKey(next.key)}
-                >
-                  {next.label}
+      {screen === 'prompt' && (
+        <div className="prompt-screen">
+          <div className="prompt-inner">
+            <div className="prompt-eyebrow">STAGE 01 · DESCRIBE BOARD</div>
+            <h1 className="prompt-title">Describe your board</h1>
+            <p className="prompt-lede">
+              Write what the board needs to do in plain language — voltages, interfaces, size,
+              environment. Tracer extracts the stated requirements, infers the gaps, and formalizes
+              them into a spec you can review.
+            </p>
+
+            <div className="prompt-card">
+              <textarea
+                className="prompt-textarea"
+                value={brief}
+                onChange={(event) => setBrief(event.target.value)}
+                spellCheck={false}
+                placeholder="e.g. Small USB-C powered mux board. 9–36 V input, needs 5 V at 3 A out. Talks I²C to a host controller. Must fit a 50 × 35 mm enclosure and run up to 70 °C ambient."
+              />
+              <div className="prompt-card-footer">
+                <button type="button" className="prompt-attach">
+                  + Attach datasheet / netlist
+                </button>
+                <div className="spacer" />
+                <span className="prompt-count">{brief.length} chars</span>
+                <button type="button" className="btn btn-primary" onClick={handleAnalyze}>
+                  Analyze requirements →
                 </button>
               </div>
-            )
-          })()}
+            </div>
+
+            {error && <div style={ERROR_BANNER_STYLE}>{error}</div>}
+
+            <div className="prompt-section">
+              <div className="prompt-section-label">TRY A STARTER</div>
+              <div className="starter-row">
+                {STARTER_OPTIONS.map((option) => (
+                  <button
+                    key={option.key}
+                    type="button"
+                    className="starter-chip"
+                    onClick={() => handleStarter(option.key)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="prompt-section prompt-section--extract">
+              <div className="prompt-section-label">TRACER WILL EXTRACT</div>
+              <div className="extract-row">
+                {EXTRACT_TAGS.map((tag) => (
+                  <span key={tag} className="extract-tag">
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {screen === 'analyzing' && (
+        <div className="analyzing-screen">
+          <div className="analyzing-spinner" />
+          <div className="analyzing-text">
+            <div className="analyzing-title">Analyzing intent…</div>
+            <div className="analyzing-sub">Extracting requirements from your description</div>
+          </div>
+          <div className="analyzing-steps">
+            {ANALYZING_STEPS.map((label, index) => (
+              <div key={label} className="analyzing-step">
+                <div className="analyzing-step-dot" style={{ animationDelay: `${index * 0.2}s` }} />
+                <span className="analyzing-step-label">{label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {screen === 'requirements' && (
+      <div className="layout">
+        <aside className="rail-left">
+          <div className="input-label-row">
+            <span className="input-badge">INPUT</span>
+            <span className="input-caption">plain language</span>
+          </div>
+          <div className="input-box">{brief}</div>
+          <button type="button" className="new-board-btn" onClick={handleNewBoard}>
+            + Describe a new board
+          </button>
+
+          <div className="divider" />
+
+          <div className="section-label">INTENT ANALYSIS</div>
+          <div className="stat-list">
+            <div className="stat-row">
+              <span>Requirements extracted</span>
+              <span className="stat-value">{total}</span>
+            </div>
+            <div className="stat-row">
+              <span>Stated</span>
+              <span className="stat-value stat-value--green">{statedCount}</span>
+            </div>
+            <div className="stat-row">
+              <span>Inferred</span>
+              <span className="stat-value stat-value--amber">{inferredCount}</span>
+            </div>
+          </div>
+
+          <div className="confidence-block">
+            <div className="confidence-label-row">
+              <span>OVERALL CONFIDENCE</span>
+              <span>{overallPct}</span>
+            </div>
+            <div className="confidence-track">
+              <div className="confidence-fill" style={overallBar} />
+            </div>
+          </div>
+
+          <div className="divider" />
+
+          <div className="section-label section-label--bottom">
+            <span>INFERRED ASSUMPTIONS</span>
+            <span>{inferredCount}</span>
+          </div>
+          <div className="assumptions-list">
+            {assumptions.map((item) => (
+              <div key={item.tag} className="assumption-row">
+                <div className="assumption-dot" />
+                <div>
+                  <span className="assumption-text">{item.text}</span>{' '}
+                  <span className="assumption-tag">→ {item.tag}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </aside>
+
+        <main className="main-content">
+          <div className="content-header">
+            <div>
+              <div className="content-title">Structured requirements</div>
+              <div className="content-subtitle">{summarySub}</div>
+            </div>
+            <div className="filter-row">
+              {activeFilters.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={`chip ${filter === item.key ? 'chip--active' : ''}`}
+                  onClick={() => setFilter(item.key)}
+                >
+                  {item.text}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="chip-bar">
+            {categoryChips.map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                className={`chip ${category === item.key ? 'chip--active' : ''}`}
+                onClick={() => setCategory(item.key)}
+              >
+                {item.text}
+              </button>
+            ))}
+          </div>
+
+          <div className="groups-column">
+            {groups.map((group) => (
+              <section key={group.label} className="group-section">
+                <div className="group-header">
+                  <span className="group-title">{group.label}</span>
+                  <span className="group-count">{group.count}</span>
+                  <div className="group-spacer" />
+                </div>
+                <div className="group-items">
+                  {group.items.map((req) => {
+                    const isStated = req.kind === 'stated'
+                    const stripColor = isStated ? '#9bbf9f' : '#d3ccbf'
+                    const badgeBg = isStated ? '#e7efe7' : '#fbeed8'
+                    const badgeColor = isStated ? '#3f6b50' : '#9a4d09'
+                    const badgeBorder = isStated ? '#cfe0d2' : '#f0dcb5'
+                    return (
+                      <div key={req.id} className="req-card">
+                        <div className="req-strip" style={{ background: stripColor }} />
+                        <div className="req-body">
+                          <div className="req-top-row">
+                            <span className="req-id">{req.id}</span>
+                            <button
+                              type="button"
+                              className="req-badge"
+                              onClick={() => handleToggleKind(req.id)}
+                              style={{ background: badgeBg, color: badgeColor, borderColor: badgeBorder }}
+                            >
+                              {isStated ? 'STATED' : 'INFERRED'}
+                            </button>
+                            <div className="req-spacer" />
+                            <div className="req-confidence">
+                              <span className="req-conf-label">CONF</span>
+                              <div className="req-conf-track">
+                                <div className="req-conf-fill" style={getBarStyle(req.conf)} />
+                              </div>
+                              <span className="req-conf-text">{Math.round(req.conf * 100)}%</span>
+                            </div>
+                          </div>
+                          <div className="req-title">{req.title}</div>
+                          <input
+                            className="req-input"
+                            value={req.value}
+                            onChange={(event) => handleValueChange(req.id, event.target.value)}
+                          />
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </section>
+            ))}
+          </div>
         </main>
+
+        <aside className="rail-right">
+          <div className="spec-header">
+            <span className="spec-label">FORMAL SPECIFICATION</span>
+            <span className="spec-tab">JSON</span>
+          </div>
+          <div className="spec-panel">
+            <div className="spec-panel-header">
+              <div className="spec-dot" />
+              <span className="spec-filename">rev-c-power-mux.req.json</span>
+              <div className="req-spacer" />
+              <button type="button" className="spec-copy" onClick={copyJson}>
+                {copied ? 'Copied ✓' : 'copy'}
+              </button>
+            </div>
+            <pre className="spec-pre">{jsonText}</pre>
+          </div>
+          <div className="spec-footer">
+            <div className="footer-dot" />
+            <span className="footer-note">{footerNote}</span>
+          </div>
+        </aside>
       </div>
+      )}
+
+      {screen === 'validation' && (
+        <div className="flow-screen">
+          <div className="flow-inner">
+            <div className="prompt-eyebrow">STAGE 04 · DESIGN VALIDATION</div>
+            <h1 className="prompt-title">Validate a design</h1>
+            <p className="prompt-lede">
+              Check a candidate design against the {requirements.length} structured requirements. Pick
+              a source, then run validation to see what passes, what needs attention, and what fails.
+            </p>
+
+            <div className="source-grid">
+              {DESIGN_SOURCES.map((source) => (
+                <button
+                  key={source.key}
+                  type="button"
+                  className={`source-card ${designSource === source.key ? 'source-card--active' : ''}`}
+                  onClick={() => handleSelectSource(source.key)}
+                >
+                  <span className="source-card-label">{source.label}</span>
+                  <span className="source-card-hint">{source.hint}</span>
+                </button>
+              ))}
+            </div>
+
+            <div className="prompt-card">
+              <textarea
+                className="prompt-textarea"
+                value={designText}
+                onChange={(event) => {
+                  setDesignText(event.target.value)
+                  setValidated(false)
+                }}
+                spellCheck={false}
+                placeholder={
+                  designSource === 'bom'
+                    ? 'ref,part,value,qty\nU1,TPS54331,buck,1\n…'
+                    : designSource === 'netlist'
+                    ? '(export (version "E")\n  (components …))'
+                    : 'Paste the candidate design here…'
+                }
+              />
+              <div className="prompt-card-footer">
+                <span className="prompt-count">
+                  Source: {DESIGN_SOURCES.find((s) => s.key === designSource)?.label}
+                </span>
+                <div className="spacer" />
+                <span className="prompt-count">{designText.length} chars</span>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={handleRunValidation}
+                  disabled={!designText.trim() || validating}
+                >
+                  {validating ? 'Validating…' : 'Run validation →'}
+                </button>
+              </div>
+            </div>
+
+            {error && <div style={ERROR_BANNER_STYLE}>{error}</div>}
+
+            {validated && (
+              <div className="validation-results">
+                <div className={`verdict-banner verdict-banner--${verdict}`}>
+                  <span className="verdict-mark">
+                    {verdict === 'passed' ? '✓' : verdict === 'failed' ? '✕' : '!'}
+                  </span>
+                  <div>
+                    <div className="verdict-title">
+                      {verdict === 'passed'
+                        ? 'All requirements satisfied'
+                        : verdict === 'failed'
+                        ? `${failCount} requirement${failCount === 1 ? '' : 's'} failed`
+                        : `Passed with ${warnCount} warning${warnCount === 1 ? '' : 's'}`}
+                    </div>
+                    <div className="verdict-sub">
+                      {passCount} passed · {warnCount} warnings · {failCount} failed
+                    </div>
+                  </div>
+                </div>
+
+                <div className="check-list">
+                  {checks.map((check) => (
+                    <div key={check.id} className={`check-row check-row--${check.status}`}>
+                      <span className={`check-icon check-icon--${check.status}`}>
+                        {STATUS_GLYPH[check.status]}
+                      </span>
+                      <div className="check-body">
+                        <div className="check-top">
+                          <span className="check-id">{check.id}</span>
+                          <span className="check-title">{check.title}</span>
+                        </div>
+                        <div className="check-compare">
+                          <span className="check-expected">expected {check.expected}</span>
+                          <span className="check-arrow">→</span>
+                          <span className="check-actual">got {check.actual}</span>
+                        </div>
+                      </div>
+                      <span className={`check-tag check-tag--${check.status}`}>
+                        {STATUS_WORD[check.status]}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {screen === 'remediation' && (
+        <div className="flow-screen">
+          <div className="flow-inner">
+            <div className="prompt-eyebrow">STAGE 05 · REMEDIATION</div>
+            <h1 className="prompt-title">Suggested fixes</h1>
+            <p className="prompt-lede">
+              {issues.length
+                ? `Tracer found ${issues.length} issue${issues.length === 1 ? '' : 's'}. Apply the suggested fixes below, then move on to the report.`
+                : 'No failures or warnings — nothing to remediate. Head straight to the report.'}
+            </p>
+
+            {issues.length > 0 && (
+              <div className="remediation-meta">
+                <span className="remediation-progress">
+                  {resolvedCount} of {issues.length} resolved
+                </span>
+                <div className="remediation-track">
+                  <div
+                    className="remediation-fill"
+                    style={{ width: `${issues.length ? (resolvedCount / issues.length) * 100 : 0}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            <div className="fix-list">
+              {issues.map((item) => {
+                const isApplied = Boolean(appliedFixes[item.id])
+                return (
+                  <div key={item.id} className={`fix-card ${isApplied ? 'fix-card--applied' : ''}`}>
+                    <div className="fix-head">
+                      <span className={`check-tag check-tag--${item.status}`}>
+                        {STATUS_WORD[item.status]}
+                      </span>
+                      <span className="check-id">{item.id}</span>
+                      <span className="fix-title">{item.title}</span>
+                      <div className="spacer" />
+                      <button
+                        type="button"
+                        className={`fix-btn ${isApplied ? 'fix-btn--applied' : ''}`}
+                        onClick={() => handleApplyFix(item.id)}
+                      >
+                        {isApplied ? 'Applied ✓' : 'Apply fix'}
+                      </button>
+                    </div>
+                    <div className="fix-issue">
+                      Expected {item.expected} · got {item.actual}
+                    </div>
+                    <div className="fix-suggestion">{item.fix}</div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {screen === 'report' && (
+        <div className="flow-screen">
+          <div className="flow-inner">
+            <div className="prompt-eyebrow">STAGE 06 · EXPORT REPORT</div>
+            <h1 className="prompt-title">Validation report</h1>
+            <p className="prompt-lede">
+              The full result — requirements, validation outcomes, and remediation — as a Markdown
+              report you can download and share.
+            </p>
+
+            <div className="report-stats">
+              <div className="report-stat">
+                <span className="report-stat-value">{checks.length}</span>
+                <span className="report-stat-label">checked</span>
+              </div>
+              <div className="report-stat">
+                <span className="report-stat-value report-stat-value--green">{passCount}</span>
+                <span className="report-stat-label">passed</span>
+              </div>
+              <div className="report-stat">
+                <span className="report-stat-value report-stat-value--amber">{warnCount}</span>
+                <span className="report-stat-label">warnings</span>
+              </div>
+              <div className="report-stat">
+                <span className="report-stat-value report-stat-value--red">{failCount}</span>
+                <span className="report-stat-label">failed</span>
+              </div>
+              <div className="report-stat">
+                <span className="report-stat-value">
+                  {resolvedCount}/{issues.length}
+                </span>
+                <span className="report-stat-label">resolved</span>
+              </div>
+            </div>
+
+            <div className="report-panel">
+              <div className="report-panel-header">
+                <div className="spec-dot" />
+                <span className="spec-filename">rev-c-power-mux.validation.md</span>
+                <div className="spacer" />
+                <button type="button" className="btn btn-primary report-dl" onClick={handleDownloadReport}>
+                  {reportDownloaded ? 'Downloaded ✓' : 'Download .md'}
+                </button>
+              </div>
+              <pre className="report-pre">{reportMarkdown}</pre>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
