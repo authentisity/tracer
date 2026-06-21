@@ -634,7 +634,75 @@ function ValidationOutput({ output, onEdit }) {
 
 // ── Design artifact input (Stage 4 — validate a real design) ─────────────────
 
+function parseCsvLine(line) {
+  const out = []
+  let cur = ''
+  let inQuotes = false
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (inQuotes) {
+      if (ch === '"' && line[i + 1] === '"') {
+        cur += '"'
+        i++
+      } else if (ch === '"') {
+        inQuotes = false
+      } else {
+        cur += ch
+      }
+    } else if (ch === '"') {
+      inQuotes = true
+    } else if (ch === ',') {
+      out.push(cur)
+      cur = ''
+    } else {
+      cur += ch
+    }
+  }
+  out.push(cur)
+  return out.map((s) => s.trim())
+}
+
+// Convert a pasted BOM CSV (header row + rows) into the artifact shape.
+function parseBomCsv(text) {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim())
+  if (lines.length < 2) return null
+  const header = parseCsvLine(lines[0]).map((h) => h.toLowerCase())
+  const find = (...names) => header.findIndex((h) => names.some((n) => h.includes(n)))
+  const refCol = find('refdes', 'reference', 'designator', 'ref')
+  const partCol = find('mpn', 'manufacturer part', 'part number', 'part', 'comment', 'description')
+  const valCol = find('value', 'val')
+  if (refCol === -1) return null
+  const components = []
+  for (let i = 1; i < lines.length; i++) {
+    const cells = parseCsvLine(lines[i])
+    const refsCell = cells[refCol] ?? ''
+    if (!refsCell) continue
+    const part = (partCol !== -1 ? cells[partCol] : '') || ''
+    const value = (valCol !== -1 ? cells[valCol] : '') || ''
+    for (const ref of refsCell.split(/[,;\s]+/).filter(Boolean)) {
+      const comp = { ref, part }
+      if (value) comp.values = { value }
+      components.push(comp)
+    }
+  }
+  if (!components.length) return null
+  return { components, nets: [], parameters: {} }
+}
+
 function ArtifactInput({ value, onChange, candidate }) {
+  const [csv, setCsv] = useState('')
+  const [bomError, setBomError] = useState(null)
+
+  function importBom() {
+    const parsed = parseBomCsv(csv)
+    if (!parsed) {
+      setBomError('Could not parse — need a header row with a Reference column.')
+      return
+    }
+    setBomError(null)
+    onChange(JSON.stringify(parsed, null, 2))
+  }
+
   function fillFromCandidate() {
     if (!candidate) return
     const artifact = {
@@ -677,6 +745,25 @@ function ArtifactInput({ value, onChange, candidate }) {
         spellCheck={false}
         placeholder={ARTIFACT_PLACEHOLDER}
       />
+      <details className="bom-import">
+        <summary>Import a BOM (CSV)</summary>
+        <p className="artifact-hint">
+          Paste a BOM with a header row (e.g. Reference, Value, Part). Cells like
+          &quot;C1, C2, C3&quot; are expanded into separate components.
+        </p>
+        <textarea
+          className="edit-textarea mono"
+          value={csv}
+          onChange={(e) => setCsv(e.target.value)}
+          rows={5}
+          spellCheck={false}
+          placeholder={'Reference,Value,Part\nU1,,ESP32-C3\nC1,10uF,GRM188R61A106'}
+        />
+        <button type="button" className="artifact-fill" onClick={importBom}>
+          Convert to artifact
+        </button>
+        {bomError && <p className="check-flagged">{bomError}</p>}
+      </details>
     </div>
   )
 }

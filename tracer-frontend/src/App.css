@@ -1113,3 +1113,13 @@ textarea:focus-visible {
   color: var(--danger);
   font-weight: 500;
 }
+.bom-import {
+  margin-top: 12px;
+  font-size: 0.82rem;
+}
+.bom-import summary {
+  cursor: pointer;
+  color: var(--teal);
+  user-select: none;
+}
+.bom-import .artifact-fill { margin-top: 8px; }
