@@ -124,9 +124,17 @@ class _CandidateComponent(BaseModel):
     rationale: str
 
 
+class _CandidateParameter(BaseModel):
+    name: str
+    value: str
+    unit: Optional[str] = None
+    rationale: str
+
+
 class _CandidateDesign(BaseModel):
     summary: str
     components: list[_CandidateComponent]
+    key_parameters: list[_CandidateParameter]
 
 
 class _ReqCheck(BaseModel):
@@ -140,36 +148,159 @@ class _ChecksOutput(BaseModel):
     checks: list[_ReqCheck]
 
 
-_NUM_RE = re.compile(r"[-+]?\d*\.?\d+")
+_NUM_UNIT_RE = re.compile(r"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*([A-Za-zµμΩΩ°/%]+)?")
+
+_UNIT_FACTORS = {
+    # Voltage
+    "v": ("voltage", 1.0),
+    "mv": ("voltage", 1e-3),
+    "kv": ("voltage", 1e3),
+    # Current
+    "a": ("current", 1.0),
+    "ma": ("current", 1e-3),
+    "ua": ("current", 1e-6),
+    # Resistance
+    "ohm": ("resistance", 1.0),
+    "kohm": ("resistance", 1e3),
+    "mohm": ("resistance", 1e6),
+    # Capacitance
+    "f": ("capacitance", 1.0),
+    "mf": ("capacitance", 1e-3),
+    "uf": ("capacitance", 1e-6),
+    "nf": ("capacitance", 1e-9),
+    "pf": ("capacitance", 1e-12),
+    # Frequency
+    "hz": ("frequency", 1.0),
+    "khz": ("frequency", 1e3),
+    "mhz": ("frequency", 1e6),
+    "ghz": ("frequency", 1e9),
+    # Time
+    "s": ("time", 1.0),
+    "ms": ("time", 1e-3),
+    "us": ("time", 1e-6),
+    "min": ("time", 60.0),
+    "h": ("time", 3600.0),
+    "day": ("time", 86400.0),
+    "year": ("time", 365.0 * 86400.0),
+    # Length / board dimensions
+    "m": ("length", 1.0),
+    "cm": ("length", 1e-2),
+    "mm": ("length", 1e-3),
+    "um": ("length", 1e-6),
+    "mil": ("length", 2.54e-5),
+    "in": ("length", 0.0254),
+    # Data rates
+    "bps": ("data_rate", 1.0),
+    "kbps": ("data_rate", 1e3),
+    "mbps": ("data_rate", 1e6),
+    "gbps": ("data_rate", 1e9),
+    # Common unitless-ish values
+    "%": ("percent", 1.0),
+    "c": ("temperature_c", 1.0),
+}
+
+_UNIT_ALIASES = {
+    "volt": "v",
+    "volts": "v",
+    "amp": "a",
+    "amps": "a",
+    "ua": "ua",
+    "microamp": "ua",
+    "microamps": "ua",
+    "ohms": "ohm",
+    "k": "kohm",
+    "kohms": "kohm",
+    "megohm": "mohm",
+    "megohms": "mohm",
+    "second": "s",
+    "seconds": "s",
+    "sec": "s",
+    "secs": "s",
+    "minute": "min",
+    "minutes": "min",
+    "hour": "h",
+    "hours": "h",
+    "hr": "h",
+    "hrs": "h",
+    "days": "day",
+    "yr": "year",
+    "yrs": "year",
+    "years": "year",
+    "inch": "in",
+    "inches": "in",
+    "degc": "c",
+}
 
 
-def _first_number(s) -> Optional[float]:
-    """Pull the first numeric value out of a free-form string like '3.3 V'."""
-    if s is None:
+def _clean_unit(unit) -> Optional[str]:
+    if unit is None:
         return None
-    m = _NUM_RE.search(str(s))
-    return float(m.group()) if m else None
+    cleaned = str(unit).strip()
+    if not cleaned:
+        return None
+    cleaned = (
+        cleaned.replace("Ω", "ohm")
+        .replace("Ω", "ohm")
+        .replace("µ", "u")
+        .replace("μ", "u")
+        .replace("°", "")
+        .replace(" ", "")
+        .lower()
+        .rstrip(".")
+    )
+    return _UNIT_ALIASES.get(cleaned, cleaned)
+
+
+def _quantity(value, unit_hint=None) -> Optional[tuple[float, Optional[str], Optional[str]]]:
+    if value is None:
+        return None
+    m = _NUM_UNIT_RE.search(str(value))
+    if not m:
+        return None
+    number = float(m.group(1))
+    unit = _clean_unit(m.group(2) or unit_hint)
+    if unit in _UNIT_FACTORS:
+        dimension, factor = _UNIT_FACTORS[unit]
+        return number * factor, dimension, unit
+    if unit is None:
+        return number, None, None
+    return number, "unknown", unit
+
+
+def _normalized_verdict(verdict: str) -> str:
+    verdict = str(verdict or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return verdict if verdict in {"pass", "fail", "needs_review"} else "needs_review"
 
 
 def _resolve_verdict(req: dict, design_value, llm_verdict: str) -> tuple[str, str]:
     """Prefer a deterministic numeric comparison; fall back to the model's judgement.
 
-    Returns (verdict, method) where method is 'deterministic' or 'judgment'.
+    Returns (verdict, method) for UI display and traceability.
     """
     op = req.get("operator")
-    expected = _first_number(req.get("value"))
-    actual = _first_number(design_value)
-    if op in {"<=", ">=", "<", ">", "=="} and expected is not None and actual is not None:
+    expected = _quantity(req.get("value"), req.get("unit"))
+    actual = _quantity(design_value)
+
+    if op in {"<=", ">=", "<", ">", "=="} and (expected is None or actual is None):
+        return "needs_review", "incomplete_value"
+
+    if op in {"<=", ">=", "<", ">", "=="} and expected and actual:
+        expected_value, expected_dimension, _ = expected
+        actual_value, actual_dimension, _ = actual
+
+        if expected_dimension != actual_dimension:
+            return "needs_review", "unit_mismatch"
+
         ok = {
-            "<=": actual <= expected,
-            ">=": actual >= expected,
-            "<": actual < expected,
-            ">": actual > expected,
-            "==": abs(actual - expected) <= 1e-9 + 1e-6 * abs(expected),
+            "<=": actual_value <= expected_value,
+            ">=": actual_value >= expected_value,
+            "<": actual_value < expected_value,
+            ">": actual_value > expected_value,
+            "==": abs(actual_value - expected_value) <= 1e-9 + 1e-6 * abs(expected_value),
         }[op]
         return ("pass" if ok else "fail", "deterministic")
-    verdict = llm_verdict if llm_verdict in {"pass", "fail", "needs_review"} else "needs_review"
-    return (verdict, "judgment")
+
+    return _normalized_verdict(llm_verdict), "judgment"
 
 
 def run_validation(intent: str, intent_expansion: dict, formal_requirements: dict) -> dict:
@@ -180,8 +311,9 @@ def run_validation(intent: str, intent_expansion: dict, formal_requirements: dic
     design_prompt = (
         "You are a senior PCB/electronics engineer. Propose ONE concrete candidate board design "
         "that attempts to satisfy the requirements below. List the key components you would choose "
-        "(reference designator, a specific real part or part family, and a one-line rationale). "
-        "Pick realistic parts and concrete values.\n\n"
+        "(reference designator, a specific real part or part family, and a one-line rationale), "
+        "plus key design parameters with concrete values and units where applicable. Pick realistic "
+        "parts and concrete values.\n\n"
         f"Board goal:\n{intent_expansion.get('restated_goal', intent)}\n\n"
         f"Requirements:\n{req_lines}"
     )
@@ -191,6 +323,10 @@ def run_validation(intent: str, intent_expansion: dict, formal_requirements: dic
     comp_lines = "\n".join(
         f"  {c.get('ref', '?')}: {c.get('part', '')} — {c.get('rationale', '')}"
         for c in design.get("components", [])
+    )
+    parameter_lines = "\n".join(
+        f"  {p.get('name', '')}: {p.get('value', '')} {p.get('unit') or ''} — {p.get('rationale', '')}"
+        for p in design.get("key_parameters", [])
     )
     req_detail = "\n".join(
         f"  [{r.get('id', '?')}] {r.get('statement', '')}"
@@ -209,9 +345,11 @@ def run_validation(intent: str, intent_expansion: dict, formal_requirements: dic
         "value or property the candidate design exhibits for that requirement's parameter (a short "
         "string, or null if the design does not address it); a verdict of 'pass', 'fail', or "
         "'needs_review'; and a one-sentence rationale. Be strict: if the design does not clearly "
-        "address a requirement, use 'needs_review' or 'fail', never 'pass'.\n\n"
+        "address a requirement, use 'needs_review' or 'fail', never 'pass'. For quantitative checks, "
+        "include a numeric design_value with units, for example '3.3 V' or '250 mA'.\n\n"
         f"Candidate design:\n{design.get('summary', '')}\n\n"
         f"Components:\n{comp_lines}\n\n"
+        f"Key parameters:\n{parameter_lines}\n\n"
         f"Requirements:\n{req_detail}"
     )
     checks = _call_structured(_ChecksOutput, check_prompt).get("checks", [])

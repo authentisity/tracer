@@ -993,6 +993,8 @@ textarea:focus-visible {
   padding: 1px 6px;
 }
 .method-tag--deterministic { color: var(--teal); border-color: var(--teal-dim); }
+.method-tag--unit_mismatch,
+.method-tag--incomplete_value { color: var(--copper); border-color: var(--copper-dim); }
 
 .design-comp-list {
   list-style: none;
@@ -1010,6 +1012,33 @@ textarea:focus-visible {
 }
 .design-comp-part { color: var(--text); font-weight: 600; }
 .design-comp-rationale { color: var(--text-dim); font-size: 0.82rem; }
+
+.design-param-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+.design-param {
+  display: grid;
+  gap: 2px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.02);
+}
+.design-param-name {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.design-param-value { color: var(--text); font-size: 0.9rem; }
+.design-param-rationale {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
 
 .check-compare {
   display: flex;

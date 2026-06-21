@@ -66,6 +66,12 @@ const STAGE_ENDPOINT = {
 }
 
 const VERDICT_LABEL = { pass: 'Pass', fail: 'Fail', needs_review: 'Review' }
+const METHOD_LABEL = {
+  deterministic: 'math check',
+  judgment: 'reviewer',
+  unit_mismatch: 'unit mismatch',
+  incomplete_value: 'needs value',
+}
 
 const CATEGORY_LABELS = {
   power: 'Power',
@@ -498,6 +504,7 @@ function ValidationOutput({ output, onEdit }) {
   const summary = output.summary ?? { pass: 0, fail: 0, needs_review: 0, total: 0 }
   const results = output.results ?? []
   const design = output.design ?? null
+  const keyParameters = design?.key_parameters ?? []
 
   return (
     <div className="stage-output">
@@ -523,38 +530,58 @@ function ValidationOutput({ output, onEdit }) {
               ))}
             </ul>
           )}
+          {keyParameters.length > 0 && (
+            <div className="design-param-grid">
+              {keyParameters.map((p, i) => (
+                <div key={`${p.name}-${i}`} className="design-param">
+                  <span className="design-param-name">{p.name}</span>
+                  <span className="mono design-param-value">
+                    {p.value}{p.unit ? ` ${p.unit}` : ''}
+                  </span>
+                  {p.rationale && <span className="design-param-rationale">{p.rationale}</span>}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
       <div className="output-field">
         <h3 className="output-field-label">Requirement checks</h3>
-        {results.map((r, i) => (
-          <div key={r.req_id ?? i} className="req-card">
-            <div className="req-card-header">
-              <span className="mono req-id">{r.req_id}</span>
-              <VerdictBadge verdict={r.verdict} />
-              <span className={`method-tag method-tag--${r.method}`}>{r.method}</span>
-            </div>
-            <p className="req-statement">{r.statement}</p>
-            <div className="check-compare">
-              {(r.parameter || r.value != null) && (
-                <span className="check-expected">
-                  expected{' '}
-                  <span className="mono">
-                    {r.operator} {r.value}
-                    {r.unit ? ` ${r.unit}` : ''}
+        {results.length === 0 && <p className="output-prose">No requirement checks returned.</p>}
+        {results.map((r, i) => {
+          const method = r.method ?? 'judgment'
+          return (
+            <div key={r.req_id ?? i} className="req-card">
+              <div className="req-card-header">
+                <span className="mono req-id">{r.req_id}</span>
+                <VerdictBadge verdict={r.verdict} />
+                <span className={`method-tag method-tag--${method}`}>
+                  {METHOD_LABEL[method] ?? method}
+                </span>
+              </div>
+              <p className="req-statement">{r.statement}</p>
+              <div className="check-compare">
+                {(r.parameter || r.value != null) && (
+                  <span className="check-expected">
+                    expected{' '}
+                    <span className="mono">
+                      {r.parameter ? `${r.parameter} ` : ''}
+                      {r.operator} {r.value}
+                      {r.unit ? ` ${r.unit}` : ''}
+                    </span>
                   </span>
-                </span>
-              )}
-              {r.design_value != null && (
-                <span className="check-actual">
-                  design <span className="mono">{r.design_value}</span>
-                </span>
-              )}
+                )}
+                {r.design_value != null && (
+                  <span className="check-actual">
+                    design <span className="mono">{r.design_value}</span>
+                  </span>
+                )}
+              </div>
+              {r.rationale && <p className="check-rationale">{r.rationale}</p>}
             </div>
-            {r.rationale && <p className="check-rationale">{r.rationale}</p>}
-          </div>
-        ))}
+          )
+        })}
       </div>
 
       <div className="output-actions">
@@ -612,8 +639,11 @@ function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise }) {
     }
   }
 
-  const canRun = status === 'pending' || status === 'failed'
   const isRunning = status === 'running' || running
+  const canRun = status === 'pending' || status === 'failed' || status === 'complete'
+  const runLabel = stageDef.key === 'validation' ? 'Run validation' : 'Run analysis'
+  const rerunLabel = stageDef.key === 'validation' ? 'Re-run validation' : 'Re-run analysis'
+  const runningLabel = stageDef.key === 'validation' ? 'Validating' : 'Analysing'
 
   return (
     <section className="stage-panel" aria-label={stageDef.label}>
@@ -662,7 +692,7 @@ function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise }) {
             onClick={runStage}
             disabled={isRunning}
           >
-            Run analysis
+            {runLabel}
           </button>
         </div>
       )}
@@ -670,7 +700,7 @@ function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise }) {
       {isRunning && (
         <div className="stage-running">
           <Spinner />
-          <p className="stage-running-text">Analysing — this takes a few seconds…</p>
+          <p className="stage-running-text">{runningLabel} — this takes a few seconds…</p>
         </div>
       )}
 
@@ -691,7 +721,7 @@ function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise }) {
           {canRun && (
             <div className="output-actions">
               <button className="btn btn--ghost btn--sm" onClick={runStage} disabled={isRunning}>
-                Re-run analysis
+                {rerunLabel}
               </button>
             </div>
           )}
