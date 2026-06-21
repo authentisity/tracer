@@ -1112,6 +1112,97 @@ function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise, per
   )
 }
 
+// ── Export: assemble the full pipeline into a Markdown report ────────────────
+
+function buildReport(project) {
+  const byType = {}
+  for (const s of project.stages ?? []) {
+    if (s.status === 'complete' && s.output_json) byType[s.stage_type] = s.output_json
+  }
+  const lines = [`# Tracer Report — ${project.name || 'Untitled board'}`, '']
+  if (project.intent) lines.push(`**Board description:** ${project.intent}`, '')
+
+  const intent = byType.intent_expansion
+  if (intent) {
+    lines.push('## Intent Analysis', '')
+    if (intent.restated_goal) lines.push(`**Goal:** ${intent.restated_goal}`, '')
+    if (intent.functional_description) lines.push(`**Functional:** ${intent.functional_description}`, '')
+    if (intent.inferred_context) lines.push(`**Context:** ${intent.inferred_context}`, '')
+    if (intent.open_questions?.length) {
+      lines.push('**Open questions:**')
+      for (const q of intent.open_questions) lines.push(`- ${q}`)
+      lines.push('')
+    }
+  }
+
+  const bullets = byType.structured_bullets
+  if (bullets?.bullets?.length) {
+    lines.push('## Structured Requirements', '')
+    const grouped = {}
+    for (const b of bullets.bullets) (grouped[b.category ?? 'other'] ??= []).push(b)
+    for (const [cat, items] of Object.entries(grouped)) {
+      lines.push(`### ${CATEGORY_LABELS[cat] ?? cat}`)
+      for (const b of items) {
+        lines.push(`- _[${b.provenance === 'user_stated' ? 'stated' : 'inferred'}]_ ${b.text}`)
+      }
+      lines.push('')
+    }
+  }
+
+  const formal = byType.formal_requirements
+  if (formal?.requirements?.length) {
+    lines.push('## Formal Specification', '')
+    for (const r of formal.requirements) {
+      const constraint = r.parameter
+        ? ` \`${r.parameter} ${r.operator ?? ''} ${r.value ?? ''}${r.unit ? ' ' + r.unit : ''}\``
+        : ''
+      const verify = r.verification_method ? ` · verify: ${r.verification_method}` : ''
+      lines.push(`- **${r.id}** — ${r.statement}${constraint}${verify}`)
+    }
+    lines.push('')
+  }
+
+  const validation = byType.validation
+  if (validation?.results?.length) {
+    const s = validation.summary ?? {}
+    lines.push(`## Validation — ${s.pass ?? 0} pass / ${s.fail ?? 0} fail / ${s.needs_review ?? 0} review`, '')
+    if (validation.design?.summary) lines.push(`_Design: ${validation.design.summary}_`, '')
+    for (const r of validation.results) {
+      const dv = r.design_value ? ` — design: ${r.design_value}` : ''
+      lines.push(`- **${r.req_id}** ${(r.verdict ?? '').toUpperCase()}${dv}${r.rationale ? ` — ${r.rationale}` : ''}`)
+    }
+    lines.push('')
+  }
+
+  const remediation = byType.remediation
+  if (remediation?.fixes?.length) {
+    lines.push('## Remediation', '')
+    for (const f of remediation.fixes) {
+      lines.push(`- **${f.req_id}** [${(f.change_type ?? '').replace(/_/g, ' ')}] ${f.issue ?? ''} → ${f.suggestion ?? ''}`)
+    }
+    lines.push('')
+  } else if (remediation?.all_clear) {
+    lines.push('## Remediation', '', '✓ All requirements satisfied — nothing to remediate.', '')
+  }
+
+  return lines.join('\n')
+}
+
+function downloadReport(project) {
+  const md = buildReport(project)
+  const safe = (project.name || 'tracer-report')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+  const blob = new Blob([md], { type: 'text/markdown' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${safe || 'tracer-report'}.md`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 // ── Project setup form ───────────────────────────────────────────────────────
 
 function ProjectSetup({ onCreate }) {
@@ -1292,6 +1383,13 @@ export default function App() {
         </div>
         <div className="app-header-right">
           <span className="project-name">{project.name ?? 'Untitled board'}</span>
+          <button
+            className="btn btn--ghost btn--sm"
+            onClick={() => downloadReport(project)}
+            disabled={!project.stages?.some((s) => s.status === 'complete')}
+          >
+            Export report
+          </button>
           <button
             className="btn btn--ghost btn--sm"
             onClick={() => {
