@@ -30,6 +30,11 @@ const api = {
       method: 'POST',
       body: JSON.stringify({ edited_output: editedOutput, note }),
     }),
+  saveArtifact: (projectId, artifact) =>
+    apiFetch(`/projects/${projectId}/stage/design_artifact`, {
+      method: 'POST',
+      body: JSON.stringify({ artifact }),
+    }),
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -890,12 +895,14 @@ function ArtifactInput({ value, onChange, candidate }) {
 
 // ── Stage panel ──────────────────────────────────────────────────────────────
 
-function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise }) {
+function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise, persistedArtifact }) {
   const [running, setRunning] = useState(false)
   const [error, setError] = useState(null)
   const [savingRevision, setSavingRevision] = useState(false)
   const [revisionSaved, setRevisionSaved] = useState(false)
-  const [artifact, setArtifact] = useState('')
+  const [artifact, setArtifact] = useState(
+    persistedArtifact ? JSON.stringify(persistedArtifact, null, 2) : '',
+  )
   const pendingEditRef = useRef(null)
 
   const status = stage?.status ?? 'pending'
@@ -920,6 +927,9 @@ function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise }) {
     }
     setRunning(true)
     try {
+      if (stageDef.key === 'validation' && body?.artifact) {
+        await api.saveArtifact(projectId, body.artifact) // persist as a design_artifact stage
+      }
       const result = await api.runStage(projectId, STAGE_ENDPOINT[stageDef.key], body)
       onStageComplete(stageDef.key, result)
     } catch (err) {
@@ -1262,6 +1272,7 @@ export default function App() {
             projectId={projectId}
             onStageComplete={handleStageComplete}
             onRevise={handleRevise}
+            persistedArtifact={project.stages?.find((s) => s.stage_type === 'design_artifact')?.output_json}
           />
 
           {/* next-stage nudge */}
