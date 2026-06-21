@@ -1,6 +1,6 @@
 :root {
   color-scheme: light;
-  --page-bg: #f4f2ee;
+  --page-bg: #f3f0e9;
   --surface: #ffffff;
   --rail-bg: #fbfaf6;
   --stage-strip-bg: #faf8f3;
@@ -10,6 +10,7 @@
   --text-tertiary: #8a8473;
   --text-alt: #46423a;
   --border: #e4e0d8;
+  --border-glass: #e7e2d9;
   --border-soft: #e6e2da;
   --border-muted: #e9e5dd;
   --accent: #c2620e;
@@ -68,6 +69,94 @@ textarea:focus-visible {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
+  position: relative;
+  overflow: hidden;
+  background: var(--page-bg);
+}
+
+/* Soft gradient "glass streams" backdrop behind the chrome */
+.bg-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.bg-blob {
+  position: absolute;
+  border-radius: 50%;
+}
+
+.bg-blob--1 {
+  top: -16%;
+  left: -18%;
+  width: 80%;
+  height: 60%;
+  background: radial-gradient(ellipse at center, rgba(96, 128, 240, 0.55) 0%, rgba(96, 128, 240, 0) 66%);
+  transform: rotate(-16deg);
+  filter: blur(58px);
+}
+
+.bg-blob--2 {
+  top: 4%;
+  left: 26%;
+  width: 74%;
+  height: 52%;
+  background: radial-gradient(ellipse at center, rgba(176, 118, 236, 0.48) 0%, rgba(176, 118, 236, 0) 66%);
+  transform: rotate(-14deg);
+  filter: blur(62px);
+}
+
+.bg-blob--3 {
+  top: 32%;
+  left: 44%;
+  width: 70%;
+  height: 54%;
+  background: radial-gradient(ellipse at center, rgba(236, 116, 176, 0.44) 0%, rgba(236, 116, 176, 0) 66%);
+  transform: rotate(-12deg);
+  filter: blur(62px);
+}
+
+.bg-blob--4 {
+  bottom: -24%;
+  right: -16%;
+  width: 86%;
+  height: 66%;
+  background: radial-gradient(ellipse at center, rgba(246, 156, 56, 0.56) 0%, rgba(246, 156, 56, 0) 66%);
+  transform: rotate(-18deg);
+  filter: blur(62px);
+}
+
+.bg-blob--5 {
+  bottom: -12%;
+  left: 6%;
+  width: 56%;
+  height: 44%;
+  background: radial-gradient(ellipse at center, rgba(238, 168, 118, 0.34) 0%, rgba(238, 168, 118, 0) 66%);
+  transform: rotate(-20deg);
+  filter: blur(64px);
+}
+
+.bg-streak {
+  position: absolute;
+  top: -22%;
+  left: 34%;
+  width: 26%;
+  height: 150%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.12) 50%, rgba(255, 255, 255, 0) 100%);
+  transform: rotate(20deg);
+  filter: blur(34px);
+}
+
+/* Keep the chrome above the gradient layer */
+.topbar,
+.stage-strip,
+.layout,
+.prompt-screen,
+.analyzing-screen {
+  position: relative;
+  z-index: 1;
 }
 
 .topbar {
@@ -76,8 +165,10 @@ textarea:focus-visible {
   gap: 18px;
   padding: 0 22px;
   height: 56px;
-  background: #fff;
-  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.66);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--border-glass);
 }
 
 .brand-row {
@@ -211,8 +302,10 @@ textarea:focus-visible {
   align-items: center;
   gap: 18px;
   padding: 11px 22px;
-  background: var(--stage-strip-bg);
-  border-bottom: 1px solid var(--border);
+  background: rgba(250, 248, 243, 0.48);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--border-glass);
 }
 
 .stage-item {
@@ -302,8 +395,10 @@ textarea:focus-visible {
 }
 
 .rail-left {
-  background: var(--rail-bg);
-  border-right: 1px solid var(--border);
+  background: rgba(251, 250, 246, 0.55);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-right: 1px solid var(--border-glass);
   padding: 18px 18px 30px;
 }
 
@@ -653,8 +748,10 @@ textarea:focus-visible {
 }
 
 .rail-right {
-  background: var(--rail-bg);
-  border-left: 1px solid var(--border);
+  background: rgba(251, 250, 246, 0.5);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-left: 1px solid var(--border-glass);
   display: flex;
   flex-direction: column;
   overflow: hidden;

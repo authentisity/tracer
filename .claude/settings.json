@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npx vite *)"
+      "Bash(npx vite *)",
+      "Bash(git checkout *)",
+      "Bash(git -C /Users/kchhim/Documents/GitHub/tracer status --short tracer-frontend/src tracer-frontend/dist)",
+      "Bash(grep -iE '^\\(vite|react|react-dom\\)$|vitejs')",
+      "Bash(./node_modules/.bin/vite --version)"
     ]
   }
 }

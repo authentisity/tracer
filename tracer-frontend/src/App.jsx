@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import './App.css'
 
 const CATEGORY_LABELS = {
   power: 'Power',
@@ -268,6 +269,15 @@ export default function App() {
 
   return (
     <div className="app">
+      <div className="bg-layer" aria-hidden="true">
+        <div className="bg-blob bg-blob--1" />
+        <div className="bg-blob bg-blob--2" />
+        <div className="bg-blob bg-blob--3" />
+        <div className="bg-blob bg-blob--4" />
+        <div className="bg-blob bg-blob--5" />
+        <div className="bg-streak" />
+      </div>
+
       <header className="topbar">
         <div className="brand-row">
           <div className="brand-mark">T</div>
