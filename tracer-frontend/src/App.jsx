@@ -50,12 +50,27 @@ const STAGES = [
     shortLabel: 'Formal Spec',
     description: 'Machine-readable spec with test criteria',
   },
+  {
+    key: 'validation',
+    label: 'Validation',
+    shortLabel: 'Validation',
+    description: 'Check a candidate design against the spec',
+  },
 ]
 
 const STAGE_ENDPOINT = {
   intent_expansion: 'intent_expansion',
   structured_bullets: 'structured_bullets',
   formal_requirements: 'formal_requirements',
+  validation: 'validation',
+}
+
+const VERDICT_LABEL = { pass: 'Pass', fail: 'Fail', needs_review: 'Review' }
+const METHOD_LABEL = {
+  deterministic: 'math check',
+  judgment: 'reviewer',
+  unit_mismatch: 'unit mismatch',
+  incomplete_value: 'needs value',
 }
 
 const CATEGORY_LABELS = {
@@ -426,6 +441,158 @@ function FormalRequirementsOutput({ output, onEdit }) {
   )
 }
 
+// ── Stage 4: Validation ──────────────────────────────────────────────────────
+
+function VerdictBadge({ verdict }) {
+  return (
+    <span className={`verdict-badge verdict-badge--${verdict}`}>
+      {VERDICT_LABEL[verdict] ?? verdict}
+    </span>
+  )
+}
+
+function ValidationOutput({ output, onEdit }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const textareaRef = useRef(null)
+
+  function startEdit() {
+    setDraft(JSON.stringify(output, null, 2))
+    setEditing(true)
+  }
+
+  function handleSave() {
+    try {
+      onEdit(JSON.parse(draft))
+      setEditing(false)
+    } catch {
+      // keep editing — parse error
+    }
+  }
+
+  useEffect(() => {
+    if (editing && textareaRef.current) textareaRef.current.focus()
+  }, [editing])
+
+  if (editing) {
+    return (
+      <div className="edit-block">
+        <label className="edit-label" htmlFor="validation-edit">
+          Edit validation output (JSON)
+        </label>
+        <textarea
+          id="validation-edit"
+          ref={textareaRef}
+          className="edit-textarea mono"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          rows={28}
+          spellCheck={false}
+        />
+        <div className="edit-actions">
+          <button className="btn btn--primary" onClick={handleSave}>
+            Save changes
+          </button>
+          <button className="btn btn--ghost" onClick={() => setEditing(false)}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  const summary = output.summary ?? { pass: 0, fail: 0, needs_review: 0, total: 0 }
+  const results = output.results ?? []
+  const design = output.design ?? null
+  const keyParameters = design?.key_parameters ?? []
+
+  return (
+    <div className="stage-output">
+      <div className="validation-summary">
+        <span className="vsum-chip vsum-chip--pass">{summary.pass} pass</span>
+        <span className="vsum-chip vsum-chip--fail">{summary.fail} fail</span>
+        <span className="vsum-chip vsum-chip--review">{summary.needs_review} review</span>
+        <span className="vsum-total">of {summary.total} requirements</span>
+      </div>
+
+      {design && (
+        <div className="output-field">
+          <h3 className="output-field-label">Candidate design (AI-generated)</h3>
+          <p className="output-prose">{design.summary}</p>
+          {design.components?.length > 0 && (
+            <ul className="design-comp-list">
+              {design.components.map((c, i) => (
+                <li key={i} className="design-comp">
+                  <span className="mono req-id">{c.ref}</span>
+                  <span className="design-comp-part">{c.part}</span>
+                  {c.rationale && <span className="design-comp-rationale">{c.rationale}</span>}
+                </li>
+              ))}
+            </ul>
+          )}
+          {keyParameters.length > 0 && (
+            <div className="design-param-grid">
+              {keyParameters.map((p, i) => (
+                <div key={`${p.name}-${i}`} className="design-param">
+                  <span className="design-param-name">{p.name}</span>
+                  <span className="mono design-param-value">
+                    {p.value}{p.unit ? ` ${p.unit}` : ''}
+                  </span>
+                  {p.rationale && <span className="design-param-rationale">{p.rationale}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="output-field">
+        <h3 className="output-field-label">Requirement checks</h3>
+        {results.length === 0 && <p className="output-prose">No requirement checks returned.</p>}
+        {results.map((r, i) => {
+          const method = r.method ?? 'judgment'
+          return (
+            <div key={r.req_id ?? i} className="req-card">
+              <div className="req-card-header">
+                <span className="mono req-id">{r.req_id}</span>
+                <VerdictBadge verdict={r.verdict} />
+                <span className={`method-tag method-tag--${method}`}>
+                  {METHOD_LABEL[method] ?? method}
+                </span>
+              </div>
+              <p className="req-statement">{r.statement}</p>
+              <div className="check-compare">
+                {(r.parameter || r.value != null) && (
+                  <span className="check-expected">
+                    expected{' '}
+                    <span className="mono">
+                      {r.parameter ? `${r.parameter} ` : ''}
+                      {r.operator} {r.value}
+                      {r.unit ? ` ${r.unit}` : ''}
+                    </span>
+                  </span>
+                )}
+                {r.design_value != null && (
+                  <span className="check-actual">
+                    design <span className="mono">{r.design_value}</span>
+                  </span>
+                )}
+              </div>
+              {r.rationale && <p className="check-rationale">{r.rationale}</p>}
+            </div>
+          )
+        })}
+      </div>
+
+      <div className="output-actions">
+        <button className="btn btn--ghost btn--sm" onClick={startEdit}>
+          Edit results
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ── Stage panel ──────────────────────────────────────────────────────────────
 
 function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise }) {
@@ -472,8 +639,11 @@ function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise }) {
     }
   }
 
-  const canRun = status === 'pending' || status === 'failed'
   const isRunning = status === 'running' || running
+  const canRun = status === 'pending' || status === 'failed' || status === 'complete'
+  const runLabel = stageDef.key === 'validation' ? 'Run validation' : 'Run analysis'
+  const rerunLabel = stageDef.key === 'validation' ? 'Re-run validation' : 'Re-run analysis'
+  const runningLabel = stageDef.key === 'validation' ? 'Validating' : 'Analysing'
 
   return (
     <section className="stage-panel" aria-label={stageDef.label}>
@@ -513,14 +683,16 @@ function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise }) {
               ? 'Ready to analyse your board description.'
               : stageDef.key === 'structured_bullets'
               ? 'Complete Intent Analysis first, then run this stage.'
-              : 'Complete Structured Requirements first, then run this stage.'}
+              : stageDef.key === 'formal_requirements'
+              ? 'Complete Structured Requirements first, then run this stage.'
+              : 'Complete the Formal Specification first, then run this stage.'}
           </p>
           <button
             className="btn btn--primary"
             onClick={runStage}
             disabled={isRunning}
           >
-            Run analysis
+            {runLabel}
           </button>
         </div>
       )}
@@ -528,7 +700,7 @@ function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise }) {
       {isRunning && (
         <div className="stage-running">
           <Spinner />
-          <p className="stage-running-text">Analysing — this takes a few seconds…</p>
+          <p className="stage-running-text">{runningLabel} — this takes a few seconds…</p>
         </div>
       )}
 
@@ -543,10 +715,13 @@ function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise }) {
           {stageDef.key === 'formal_requirements' && (
             <FormalRequirementsOutput output={output} onEdit={handleEdit} />
           )}
+          {stageDef.key === 'validation' && (
+            <ValidationOutput output={output} onEdit={handleEdit} />
+          )}
           {canRun && (
             <div className="output-actions">
               <button className="btn btn--ghost btn--sm" onClick={runStage} disabled={isRunning}>
-                Re-run analysis
+                {rerunLabel}
               </button>
             </div>
           )}
