@@ -29,6 +29,7 @@ from schemas import (
     RunStageResponse,
     ReviseRequest,
     ReviseResponse,
+    ValidateRequest,
 )
 
 
@@ -158,7 +159,7 @@ def run_formal_requirements_endpoint(project_id: int):
 
 
 @app.post("/projects/{project_id}/stage/validation", response_model=RunStageResponse)
-def run_validation_endpoint(project_id: int):
+def run_validation_endpoint(project_id: int, body: ValidateRequest | None = None):
     project = get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -172,11 +173,23 @@ def run_validation_endpoint(project_id: int):
 
     intent_expansion = intent_stage["output_json"] if intent_stage else {}
     formal_requirements = formal_stage["output_json"]
-    input_data = {"intent": project["intent"], "formal_requirements": formal_requirements}
+    artifact = body.artifact if body else None
+    if artifact is None:
+        # Fall back to a previously persisted design_artifact stage.
+        da_stage = stages_by_type.get("design_artifact")
+        if da_stage and da_stage["status"] == "complete":
+            artifact = da_stage["output_json"]
+    input_data = {
+        "intent": project["intent"],
+        "formal_requirements": formal_requirements,
+        "artifact": artifact,
+    }
     stage_id = upsert_stage(project_id, "validation", "running", input_data=input_data)
 
     try:
-        output = run_validation(project["intent"], intent_expansion, formal_requirements)
+        output = run_validation(
+            project["intent"], intent_expansion, formal_requirements, artifact=artifact
+        )
     except Exception as exc:
         upsert_stage(project_id, "validation", "failed",
                      input_data=input_data, error=str(exc))
@@ -185,6 +198,22 @@ def run_validation_endpoint(project_id: int):
     upsert_stage(project_id, "validation", "complete",
                  input_data=input_data, output_data=output)
     return RunStageResponse(stage_id=stage_id, output=output)
+
+
+@app.post("/projects/{project_id}/stage/design_artifact", response_model=RunStageResponse)
+def save_design_artifact_endpoint(project_id: int, body: ValidateRequest):
+    """Persist a user-provided design artifact as its own stage so it survives reloads
+    and is reused by validation when no artifact is supplied in the request."""
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    artifact = body.artifact or {}
+    stage_id = upsert_stage(
+        project_id, "design_artifact", "complete",
+        input_data={"intent": project["intent"]}, output_data=artifact,
+    )
+    return RunStageResponse(stage_id=stage_id, output=artifact)
 
 
 # ── Revisions ─────────────────────────────────────────────────────────────────
