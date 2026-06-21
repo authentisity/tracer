@@ -446,3 +446,58 @@ def run_validation(
         "flagged": sum(1 for x in results if x["flagged_refs"]),
     }
     return {"design": design, "results": results, "summary": summary, "source": source}
+
+
+# ── Stage 5: Remediation (turn failed checks into concrete fixes) ──────────────
+
+class _Fix(BaseModel):
+    req_id: str
+    issue: str           # why the requirement isn't satisfied
+    suggestion: str      # the concrete change to make it pass
+    change_type: str     # add_component | change_value | swap_part | add_constraint | clarify
+
+
+class _RemediationOutput(BaseModel):
+    fixes: list[_Fix]
+
+
+def run_remediation(intent: str, validation: dict) -> dict:
+    """Propose a concrete fix for each requirement that failed or needs review.
+
+    Reads everything it needs from the validation output (each result already
+    carries the requirement's constraint, the design value, and the reviewer note).
+    """
+    failing = [
+        r for r in validation.get("results", [])
+        if r.get("verdict") in ("fail", "needs_review")
+    ]
+    if not failing:
+        return {"fixes": [], "all_clear": True}
+
+    design_summary = (validation.get("design") or {}).get("summary", "")
+    issues = "\n".join(
+        f"  [{f.get('req_id')}] {f.get('statement', '')}"
+        + (
+            f" (constraint: {f.get('parameter', '')} {f.get('operator', '')} "
+            f"{f.get('value', '')} {f.get('unit', '') or ''})"
+            if f.get("parameter")
+            else ""
+        )
+        + f" — verdict: {f.get('verdict')}; design value: {f.get('design_value') or 'n/a'}; "
+        + f"reviewer note: {f.get('rationale', '')}"
+        for f in failing
+    )
+    prompt = (
+        "You are a senior PCB/electronics engineer. A design was validated against a spec and some "
+        "requirements did not pass. For EACH failing requirement below, propose ONE concrete, "
+        "actionable remediation: the issue (why it's not satisfied), a suggestion (the exact change "
+        "to make — add/swap a part, change a value, add a constraint), and a change_type from: "
+        "add_component, change_value, swap_part, add_constraint, clarify. Name specific parts or "
+        "values where possible.\n\n"
+        f"Board goal:\n{intent}\n\n"
+        f"Design under review:\n{design_summary}\n\n"
+        f"Failing requirements:\n{issues}"
+    )
+    output = _call_structured(_RemediationOutput, prompt)
+    output["all_clear"] = False
+    return output

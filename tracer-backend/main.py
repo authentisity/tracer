@@ -20,6 +20,7 @@ from pipeline import (
     run_structured_bullets,
     run_formal_requirements,
     run_validation,
+    run_remediation,
 )
 from schemas import (
     CreateProjectRequest,
@@ -196,6 +197,34 @@ def run_validation_endpoint(project_id: int, body: ValidateRequest | None = None
         raise HTTPException(status_code=500, detail=str(exc))
 
     upsert_stage(project_id, "validation", "complete",
+                 input_data=input_data, output_data=output)
+    return RunStageResponse(stage_id=stage_id, output=output)
+
+
+@app.post("/projects/{project_id}/stage/remediation", response_model=RunStageResponse)
+def run_remediation_endpoint(project_id: int):
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    stages_by_type = {s["stage_type"]: s for s in get_stages_for_project(project_id)}
+    validation_stage = stages_by_type.get("validation")
+
+    if not validation_stage or validation_stage["status"] != "complete":
+        raise HTTPException(status_code=400, detail="Complete validation stage first")
+
+    validation = validation_stage["output_json"]
+    input_data = {"intent": project["intent"], "validation": validation}
+    stage_id = upsert_stage(project_id, "remediation", "running", input_data=input_data)
+
+    try:
+        output = run_remediation(project["intent"], validation)
+    except Exception as exc:
+        upsert_stage(project_id, "remediation", "failed",
+                     input_data=input_data, error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    upsert_stage(project_id, "remediation", "complete",
                  input_data=input_data, output_data=output)
     return RunStageResponse(stage_id=stage_id, output=output)
 

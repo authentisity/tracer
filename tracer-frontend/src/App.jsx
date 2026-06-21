@@ -64,6 +64,12 @@ const STAGES = [
     shortLabel: 'Validation',
     description: 'Check a candidate design against the spec',
   },
+  {
+    key: 'remediation',
+    label: 'Remediation',
+    shortLabel: 'Fixes',
+    description: 'Turn failed checks into concrete design fixes',
+  },
 ]
 
 const STAGE_ENDPOINT = {
@@ -71,6 +77,7 @@ const STAGE_ENDPOINT = {
   structured_bullets: 'structured_bullets',
   formal_requirements: 'formal_requirements',
   validation: 'validation',
+  remediation: 'remediation',
 }
 
 const VERDICT_LABEL = { pass: 'Pass', fail: 'Fail', needs_review: 'Review' }
@@ -893,6 +900,38 @@ function ArtifactInput({ value, onChange, candidate }) {
   )
 }
 
+// ── Stage 5: Remediation ─────────────────────────────────────────────────────
+
+function RemediationOutput({ output }) {
+  const fixes = output.fixes ?? []
+  if (output.all_clear || fixes.length === 0) {
+    return (
+      <div className="stage-output">
+        <p className="remediation-clear">✓ All requirements satisfied — nothing to remediate.</p>
+      </div>
+    )
+  }
+  return (
+    <div className="stage-output">
+      <p className="output-prose">
+        {fixes.length} requirement{fixes.length === 1 ? '' : 's'} need changes:
+      </p>
+      {fixes.map((f, i) => (
+        <div key={f.req_id ?? i} className="req-card">
+          <div className="req-card-header">
+            <span className="mono req-id">{f.req_id}</span>
+            {f.change_type && (
+              <span className="fix-type">{f.change_type.replace(/_/g, ' ')}</span>
+            )}
+          </div>
+          {f.issue && <p className="check-rationale">{f.issue}</p>}
+          {f.suggestion && <p className="fix-suggestion">→ {f.suggestion}</p>}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // ── Stage panel ──────────────────────────────────────────────────────────────
 
 function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise, persistedArtifact }) {
@@ -961,9 +1000,16 @@ function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise, per
 
   const isRunning = status === 'running' || running
   const canRun = status === 'pending' || status === 'failed' || status === 'complete'
-  const runLabel = stageDef.key === 'validation' ? 'Run validation' : 'Run analysis'
-  const rerunLabel = stageDef.key === 'validation' ? 'Re-run validation' : 'Re-run analysis'
-  const runningLabel = stageDef.key === 'validation' ? 'Validating' : 'Analysing'
+  const runLabel =
+    stageDef.key === 'validation' ? 'Run validation'
+    : stageDef.key === 'remediation' ? 'Suggest fixes'
+    : 'Run analysis'
+  const rerunLabel =
+    stageDef.key === 'validation' ? 'Re-run validation'
+    : stageDef.key === 'remediation' ? 'Re-run' : 'Re-run analysis'
+  const runningLabel =
+    stageDef.key === 'validation' ? 'Validating'
+    : stageDef.key === 'remediation' ? 'Generating fixes' : 'Analysing'
 
   return (
     <section className="stage-panel" aria-label={stageDef.label}>
@@ -1009,7 +1055,9 @@ function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise, per
               ? 'Complete Intent Analysis first, then run this stage.'
               : stageDef.key === 'formal_requirements'
               ? 'Complete Structured Requirements first, then run this stage.'
-              : 'Complete the Formal Specification first, then run this stage.'}
+              : stageDef.key === 'validation'
+              ? 'Complete the Formal Specification first, then run this stage.'
+              : 'Complete Validation first, then suggest fixes.'}
           </p>
           <button
             className="btn btn--primary"
@@ -1042,6 +1090,7 @@ function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise, per
           {stageDef.key === 'validation' && (
             <ValidationOutput output={output} onEdit={handleEdit} />
           )}
+          {stageDef.key === 'remediation' && <RemediationOutput output={output} />}
           {canRun && (
             <div className="output-actions">
               <button className="btn btn--ghost btn--sm" onClick={runStage} disabled={isRunning}>
