@@ -1,14 +1,21 @@
 import json
 import os
 import re
+import time
 from typing import Optional
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import BaseModel
 
 _client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
-_MODEL = "gemini-2.5-flash"
+# Model is env-configurable so a deployment can pick a tier that fits its quota
+# (e.g. set TRACER_GEMINI_MODEL=gemini-2.5-flash-lite on the free tier).
+_MODEL = os.environ.get("TRACER_GEMINI_MODEL", "gemini-2.5-flash")
+
+# Transient failures worth retrying: rate limits (429) + upstream overload/5xx.
+_RETRYABLE_CODES = {429, 500, 502, 503, 504}
 
 # ── Structured output schemas (Gemini-compatible) ─────────────────────────────
 # Kept separate from schemas.py to avoid Union types that Gemini can't represent.
@@ -50,16 +57,27 @@ class _FormalOutput(BaseModel):
 
 # ── Internal helper ───────────────────────────────────────────────────────────
 
-def _call_structured(schema: type, prompt: str) -> dict:
-    response = _client.models.generate_content(
-        model=_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=schema,
-        ),
-    )
-    return json.loads(response.text)
+def _call_structured(schema: type, prompt: str, attempts: int = 4) -> dict:
+    """Call Gemini for a structured (JSON) response, retrying transient
+    failures (429 rate-limit, 5xx overload) with exponential backoff."""
+    delay = 1.0
+    for attempt in range(attempts):
+        try:
+            response = _client.models.generate_content(
+                model=_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                ),
+            )
+            return json.loads(response.text)
+        except genai_errors.APIError as exc:
+            if getattr(exc, "code", None) in _RETRYABLE_CODES and attempt < attempts - 1:
+                time.sleep(delay)
+                delay *= 2
+                continue
+            raise
 
 
 # ── Stage runners ─────────────────────────────────────────────────────────────
