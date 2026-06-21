@@ -1101,3 +1101,15 @@ textarea:focus-visible {
   border-color: var(--teal-dim);
   background: var(--teal-glow);
 }
+.vsum-chip--flagged {
+  color: var(--copper);
+  background: transparent;
+  border-color: var(--copper);
+  border-style: dashed;
+}
+.check-flagged {
+  margin-top: 6px;
+  font-size: 0.8rem;
+  color: var(--danger);
+  font-weight: 500;
+}

@@ -142,6 +142,7 @@ class _ReqCheck(BaseModel):
     design_value: Optional[str] = None   # value the design exhibits for this req's parameter
     verdict: str                          # pass | fail | needs_review
     rationale: str
+    cited_refs: list[str] = []            # component refs / net names the verdict relied on
 
 
 class _ChecksOutput(BaseModel):
@@ -303,13 +304,17 @@ def _resolve_verdict(req: dict, design_value, llm_verdict: str) -> tuple[str, st
     return _normalized_verdict(llm_verdict), "judgment"
 
 
-def _design_from_artifact(artifact: dict) -> tuple[dict, str, str]:
+def _design_from_artifact(artifact: dict) -> tuple[dict, str, str, str]:
     """Shape a user-provided design artifact into a design dict + prompt lines."""
     components = []
     for c in artifact.get("components") or []:
         values = c.get("values") or {}
         rationale = "; ".join(f"{k}: {v}" for k, v in values.items()) or "(provided)"
         components.append({"ref": c.get("ref", ""), "part": c.get("part", ""), "rationale": rationale})
+    nets = [
+        {"name": n.get("name", ""), "pins": n.get("pins") or []}
+        for n in artifact.get("nets") or []
+    ]
     params = artifact.get("parameters") or {}
     key_parameters = [
         {"name": k, "value": str(v), "unit": None, "rationale": "user-provided"}
@@ -319,11 +324,13 @@ def _design_from_artifact(artifact: dict) -> tuple[dict, str, str]:
     design = {
         "summary": "User-provided design artifact" + (f" — {param_summary}" if param_summary else ""),
         "components": components,
+        "nets": nets,
         "key_parameters": key_parameters,
     }
     comp_lines = "\n".join(f"  {c['ref']}: {c['part']} — {c['rationale']}" for c in components)
+    net_lines = "\n".join(f"  {n['name']}: {', '.join(n['pins'])}" for n in nets)
     parameter_lines = "\n".join(f"  {p['name']}: {p['value']}" for p in key_parameters)
-    return design, comp_lines, parameter_lines
+    return design, comp_lines, net_lines, parameter_lines
 
 
 def run_validation(
@@ -337,7 +344,7 @@ def run_validation(
 
     if artifact:
         # Validate the design the user actually provided.
-        design, comp_lines, parameter_lines = _design_from_artifact(artifact)
+        design, comp_lines, net_lines, parameter_lines = _design_from_artifact(artifact)
     else:
         # 1) Generate a concrete candidate design from the requirements.
         req_lines = "\n".join(f"  [{r.get('id', '?')}] {r.get('statement', '')}" for r in reqs)
@@ -361,6 +368,7 @@ def run_validation(
             f"  {p.get('name', '')}: {p.get('value', '')} {p.get('unit') or ''} — {p.get('rationale', '')}"
             for p in design.get("key_parameters", [])
         )
+        net_lines = ""  # AI candidate design has no explicit nets
     req_detail = "\n".join(
         f"  [{r.get('id', '?')}] {r.get('statement', '')}"
         + (
@@ -373,20 +381,37 @@ def run_validation(
     )
     check_prompt = (
         "You are a senior PCB/electronics engineer acting as a design reviewer. "
-        "Given the candidate design and the formal requirements, assess whether the design satisfies "
-        "EACH requirement. For every requirement return: its req_id; the design_value — the concrete "
-        "value or property the candidate design exhibits for that requirement's parameter (a short "
+        "Given the design under review and the formal requirements, assess whether the design "
+        "satisfies EACH requirement. For every requirement return: its req_id; the design_value — the "
+        "concrete value or property the design exhibits for that requirement's parameter (a short "
         "string, or null if the design does not address it); a verdict of 'pass', 'fail', or "
-        "'needs_review'; and a one-sentence rationale. Be strict: if the design does not clearly "
-        "address a requirement, use 'needs_review' or 'fail', never 'pass'. For quantitative checks, "
-        "include a numeric design_value with units, for example '3.3 V' or '250 mA'.\n\n"
-        f"Candidate design:\n{design.get('summary', '')}\n\n"
+        "'needs_review'; a one-sentence rationale; and cited_refs — the component reference "
+        "designators or net names FROM THE DESIGN BELOW that you relied on (use only refs/nets that "
+        "actually appear in the design; return an empty list if none). Be strict: if the design does "
+        "not clearly address a requirement, use 'needs_review' or 'fail', never 'pass'. For "
+        "quantitative checks, include a numeric design_value with units, for example '3.3 V' or "
+        "'250 mA'.\n\n"
+        f"Design under review:\n{design.get('summary', '')}\n\n"
         f"Components:\n{comp_lines}\n\n"
+        f"Nets:\n{net_lines}\n\n"
         f"Key parameters:\n{parameter_lines}\n\n"
         f"Requirements:\n{req_detail}"
     )
     checks = _call_structured(_ChecksOutput, check_prompt).get("checks", [])
     checks_by_id = {c.get("req_id"): c for c in checks}
+
+    # Anti-hallucination guardrail: the set of refs/nets the design actually contains.
+    known_refs = {str(c.get("ref", "")).strip().lower() for c in design.get("components", [])}
+    known_refs |= {str(n.get("name", "")).strip().lower() for n in design.get("nets", [])}
+    known_refs.discard("")
+
+    def _flagged(cited) -> list:
+        flagged = []
+        for ref in cited or []:
+            tok = str(ref).strip().lower()
+            if tok and tok not in known_refs and tok.split(".")[0] not in known_refs:
+                flagged.append(ref)
+        return flagged
 
     # 3) Resolve each verdict deterministically where the requirement is quantitative.
     results = []
@@ -394,6 +419,10 @@ def run_validation(
         c = checks_by_id.get(r.get("id"), {})
         design_value = c.get("design_value")
         verdict, method = _resolve_verdict(r, design_value, c.get("verdict", "needs_review"))
+        flagged_refs = _flagged(c.get("cited_refs")) if known_refs else []
+        # A "pass" justified by parts/nets that aren't in the design can't be trusted.
+        if flagged_refs and verdict == "pass":
+            verdict, method = "needs_review", "unverified_reference"
         results.append({
             "req_id": r.get("id"),
             "category": r.get("category", "other"),
@@ -406,6 +435,7 @@ def run_validation(
             "verdict": verdict,
             "method": method,
             "rationale": c.get("rationale", ""),
+            "flagged_refs": flagged_refs,
         })
 
     summary = {
@@ -413,5 +443,6 @@ def run_validation(
         "pass": sum(1 for x in results if x["verdict"] == "pass"),
         "fail": sum(1 for x in results if x["verdict"] == "fail"),
         "needs_review": sum(1 for x in results if x["verdict"] == "needs_review"),
+        "flagged": sum(1 for x in results if x["flagged_refs"]),
     }
     return {"design": design, "results": results, "summary": summary, "source": source}

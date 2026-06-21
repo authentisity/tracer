@@ -74,11 +74,15 @@ const METHOD_LABEL = {
   judgment: 'reviewer',
   unit_mismatch: 'unit mismatch',
   incomplete_value: 'needs value',
+  unverified_reference: 'unverified ref',
 }
 
 const ARTIFACT_PLACEHOLDER = `{
   "components": [
     { "ref": "U1", "part": "ESP32-C3", "values": { "supply_voltage": "3.3 V" } }
+  ],
+  "nets": [
+    { "name": "3V3", "pins": ["U1.VDD"] }
   ],
   "parameters": { "input_voltage": "5 V", "sleep_current": "40 uA" }
 }`
@@ -524,6 +528,9 @@ function ValidationOutput({ output, onEdit }) {
         <span className="vsum-chip vsum-chip--pass">{summary.pass} pass</span>
         <span className="vsum-chip vsum-chip--fail">{summary.fail} fail</span>
         <span className="vsum-chip vsum-chip--review">{summary.needs_review} review</span>
+        {summary.flagged > 0 && (
+          <span className="vsum-chip vsum-chip--flagged">{summary.flagged} flagged</span>
+        )}
         <span className="vsum-total">of {summary.total} requirements</span>
         <span className={`vsource vsource--${source}`}>
           {fromArtifact ? '✓ validated your artifact' : 'AI candidate'}
@@ -543,6 +550,16 @@ function ValidationOutput({ output, onEdit }) {
                   <span className="mono req-id">{c.ref}</span>
                   <span className="design-comp-part">{c.part}</span>
                   {c.rationale && <span className="design-comp-rationale">{c.rationale}</span>}
+                </li>
+              ))}
+            </ul>
+          )}
+          {design.nets?.length > 0 && (
+            <ul className="design-comp-list">
+              {design.nets.map((n, i) => (
+                <li key={`net-${i}`} className="design-comp">
+                  <span className="mono req-id">{n.name}</span>
+                  <span className="design-comp-rationale">{(n.pins ?? []).join(', ')}</span>
                 </li>
               ))}
             </ul>
@@ -596,6 +613,11 @@ function ValidationOutput({ output, onEdit }) {
                 )}
               </div>
               {r.rationale && <p className="check-rationale">{r.rationale}</p>}
+              {r.flagged_refs?.length > 0 && (
+                <p className="check-flagged">
+                  ⚠ references not in the design: {r.flagged_refs.join(', ')}
+                </p>
+              )}
             </div>
           )
         })}
@@ -621,6 +643,7 @@ function ArtifactInput({ value, onChange, candidate }) {
         part: c.part,
         values: {},
       })),
+      nets: candidate.nets ?? [],
       parameters: Object.fromEntries(
         (candidate.key_parameters ?? []).map((p) => [
           p.name,
