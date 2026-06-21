@@ -15,7 +15,12 @@ from db import (
     upsert_stage,
     update_stage_output,
 )
-from pipeline import run_intent_expansion, run_structured_bullets, run_formal_requirements
+from pipeline import (
+    run_intent_expansion,
+    run_structured_bullets,
+    run_formal_requirements,
+    run_validation,
+)
 from schemas import (
     CreateProjectRequest,
     CreateProjectResponse,
@@ -148,6 +153,36 @@ def run_formal_requirements_endpoint(project_id: int):
         raise HTTPException(status_code=500, detail=str(exc))
 
     upsert_stage(project_id, "formal_requirements", "complete",
+                 input_data=input_data, output_data=output)
+    return RunStageResponse(stage_id=stage_id, output=output)
+
+
+@app.post("/projects/{project_id}/stage/validation", response_model=RunStageResponse)
+def run_validation_endpoint(project_id: int):
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    stages_by_type = {s["stage_type"]: s for s in get_stages_for_project(project_id)}
+    intent_stage = stages_by_type.get("intent_expansion")
+    formal_stage = stages_by_type.get("formal_requirements")
+
+    if not formal_stage or formal_stage["status"] != "complete":
+        raise HTTPException(status_code=400, detail="Complete formal_requirements stage first")
+
+    intent_expansion = intent_stage["output_json"] if intent_stage else {}
+    formal_requirements = formal_stage["output_json"]
+    input_data = {"intent": project["intent"], "formal_requirements": formal_requirements}
+    stage_id = upsert_stage(project_id, "validation", "running", input_data=input_data)
+
+    try:
+        output = run_validation(project["intent"], intent_expansion, formal_requirements)
+    except Exception as exc:
+        upsert_stage(project_id, "validation", "failed",
+                     input_data=input_data, error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    upsert_stage(project_id, "validation", "complete",
                  input_data=input_data, output_data=output)
     return RunStageResponse(stage_id=stage_id, output=output)
 

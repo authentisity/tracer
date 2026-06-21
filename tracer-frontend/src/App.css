@@ -952,3 +952,78 @@ textarea:focus-visible {
 
   .project-name { display: none; }
 }
+
+/* ── Stage 4: Validation ─────────────────────────────────────────────────────── */
+.validation-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+.vsum-chip {
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-mid);
+}
+.vsum-chip--pass { color: var(--success); background: var(--success-bg); border-color: var(--success); }
+.vsum-chip--fail { color: var(--danger); background: var(--danger-bg); border-color: var(--danger); }
+.vsum-chip--review { color: var(--copper); background: var(--copper-glow); border-color: var(--copper-dim); }
+.vsum-total { color: var(--text-dim); font-size: 0.8rem; }
+
+.verdict-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+}
+.verdict-badge--pass { color: var(--success); background: var(--success-bg); }
+.verdict-badge--fail { color: var(--danger); background: var(--danger-bg); }
+.verdict-badge--needs_review { color: var(--copper); background: var(--copper-glow); }
+
+.method-tag {
+  font-size: 0.68rem;
+  color: var(--text-faint);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+}
+.method-tag--deterministic { color: var(--teal); border-color: var(--teal-dim); }
+
+.design-comp-list {
+  list-style: none;
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.design-comp {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 0.88rem;
+}
+.design-comp-part { color: var(--text); font-weight: 600; }
+.design-comp-rationale { color: var(--text-dim); font-size: 0.82rem; }
+
+.check-compare {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 6px;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+.check-expected .mono,
+.check-actual .mono { color: var(--text); }
+.check-rationale {
+  margin-top: 8px;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  line-height: 1.5;
+}

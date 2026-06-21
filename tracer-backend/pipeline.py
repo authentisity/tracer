@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from typing import Optional
 
 from google import genai
@@ -113,3 +114,133 @@ def run_formal_requirements(intent: str, intent_expansion: dict, structured_bull
         f"Requirement bullets:\n{bullets_text}"
     )
     return _call_structured(_FormalOutput, prompt)
+
+
+# ── Stage 4: Validation (generate a candidate design, then check it) ───────────
+
+class _CandidateComponent(BaseModel):
+    ref: str             # reference designator, e.g. U1, C1
+    part: str            # specific part or part class, e.g. "AMS1117-3.3 LDO"
+    rationale: str
+
+
+class _CandidateDesign(BaseModel):
+    summary: str
+    components: list[_CandidateComponent]
+
+
+class _ReqCheck(BaseModel):
+    req_id: str
+    design_value: Optional[str] = None   # value the design exhibits for this req's parameter
+    verdict: str                          # pass | fail | needs_review
+    rationale: str
+
+
+class _ChecksOutput(BaseModel):
+    checks: list[_ReqCheck]
+
+
+_NUM_RE = re.compile(r"[-+]?\d*\.?\d+")
+
+
+def _first_number(s) -> Optional[float]:
+    """Pull the first numeric value out of a free-form string like '3.3 V'."""
+    if s is None:
+        return None
+    m = _NUM_RE.search(str(s))
+    return float(m.group()) if m else None
+
+
+def _resolve_verdict(req: dict, design_value, llm_verdict: str) -> tuple[str, str]:
+    """Prefer a deterministic numeric comparison; fall back to the model's judgement.
+
+    Returns (verdict, method) where method is 'deterministic' or 'judgment'.
+    """
+    op = req.get("operator")
+    expected = _first_number(req.get("value"))
+    actual = _first_number(design_value)
+    if op in {"<=", ">=", "<", ">", "=="} and expected is not None and actual is not None:
+        ok = {
+            "<=": actual <= expected,
+            ">=": actual >= expected,
+            "<": actual < expected,
+            ">": actual > expected,
+            "==": abs(actual - expected) <= 1e-9 + 1e-6 * abs(expected),
+        }[op]
+        return ("pass" if ok else "fail", "deterministic")
+    verdict = llm_verdict if llm_verdict in {"pass", "fail", "needs_review"} else "needs_review"
+    return (verdict, "judgment")
+
+
+def run_validation(intent: str, intent_expansion: dict, formal_requirements: dict) -> dict:
+    reqs = formal_requirements.get("requirements", [])
+
+    # 1) Generate a concrete candidate design from the requirements.
+    req_lines = "\n".join(f"  [{r.get('id', '?')}] {r.get('statement', '')}" for r in reqs)
+    design_prompt = (
+        "You are a senior PCB/electronics engineer. Propose ONE concrete candidate board design "
+        "that attempts to satisfy the requirements below. List the key components you would choose "
+        "(reference designator, a specific real part or part family, and a one-line rationale). "
+        "Pick realistic parts and concrete values.\n\n"
+        f"Board goal:\n{intent_expansion.get('restated_goal', intent)}\n\n"
+        f"Requirements:\n{req_lines}"
+    )
+    design = _call_structured(_CandidateDesign, design_prompt)
+
+    # 2) Review the candidate design against each requirement.
+    comp_lines = "\n".join(
+        f"  {c.get('ref', '?')}: {c.get('part', '')} — {c.get('rationale', '')}"
+        for c in design.get("components", [])
+    )
+    req_detail = "\n".join(
+        f"  [{r.get('id', '?')}] {r.get('statement', '')}"
+        + (
+            f"  (constraint: {r.get('parameter', '')} {r.get('operator', '')} "
+            f"{r.get('value', '')} {r.get('unit', '') or ''})"
+            if r.get("parameter")
+            else ""
+        )
+        for r in reqs
+    )
+    check_prompt = (
+        "You are a senior PCB/electronics engineer acting as a design reviewer. "
+        "Given the candidate design and the formal requirements, assess whether the design satisfies "
+        "EACH requirement. For every requirement return: its req_id; the design_value — the concrete "
+        "value or property the candidate design exhibits for that requirement's parameter (a short "
+        "string, or null if the design does not address it); a verdict of 'pass', 'fail', or "
+        "'needs_review'; and a one-sentence rationale. Be strict: if the design does not clearly "
+        "address a requirement, use 'needs_review' or 'fail', never 'pass'.\n\n"
+        f"Candidate design:\n{design.get('summary', '')}\n\n"
+        f"Components:\n{comp_lines}\n\n"
+        f"Requirements:\n{req_detail}"
+    )
+    checks = _call_structured(_ChecksOutput, check_prompt).get("checks", [])
+    checks_by_id = {c.get("req_id"): c for c in checks}
+
+    # 3) Resolve each verdict deterministically where the requirement is quantitative.
+    results = []
+    for r in reqs:
+        c = checks_by_id.get(r.get("id"), {})
+        design_value = c.get("design_value")
+        verdict, method = _resolve_verdict(r, design_value, c.get("verdict", "needs_review"))
+        results.append({
+            "req_id": r.get("id"),
+            "category": r.get("category", "other"),
+            "statement": r.get("statement", ""),
+            "parameter": r.get("parameter"),
+            "operator": r.get("operator"),
+            "value": r.get("value"),
+            "unit": r.get("unit"),
+            "design_value": design_value,
+            "verdict": verdict,
+            "method": method,
+            "rationale": c.get("rationale", ""),
+        })
+
+    summary = {
+        "total": len(results),
+        "pass": sum(1 for x in results if x["verdict"] == "pass"),
+        "fail": sum(1 for x in results if x["verdict"] == "fail"),
+        "needs_review": sum(1 for x in results if x["verdict"] == "needs_review"),
+    }
+    return {"design": design, "results": results, "summary": summary}
