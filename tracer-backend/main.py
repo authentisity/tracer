@@ -195,19 +195,17 @@ def run_remediation_endpoint(project_id: int):
         raise HTTPException(status_code=404, detail="Project not found")
 
     stages_by_type = {s["stage_type"]: s for s in get_stages_for_project(project_id)}
-    formal_stage = stages_by_type.get("formal_requirements")
     validation_stage = stages_by_type.get("validation")
 
     if not validation_stage or validation_stage["status"] != "complete":
         raise HTTPException(status_code=400, detail="Complete validation stage first")
 
-    formal_requirements = formal_stage["output_json"] if formal_stage else {}
     validation = validation_stage["output_json"]
     input_data = {"intent": project["intent"], "validation": validation}
     stage_id = upsert_stage(project_id, "remediation", "running", input_data=input_data)
 
     try:
-        output = run_remediation(project["intent"], formal_requirements, validation)
+        output = run_remediation(project["intent"], validation)
     except Exception as exc:
         upsert_stage(project_id, "remediation", "failed",
                      input_data=input_data, error=str(exc))

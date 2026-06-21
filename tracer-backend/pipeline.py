@@ -397,8 +397,12 @@ class _RemediationOutput(BaseModel):
     fixes: list[_Fix]
 
 
-def run_remediation(intent: str, formal_requirements: dict, validation: dict) -> dict:
-    """Propose a concrete fix for each requirement that failed or needs review."""
+def run_remediation(intent: str, validation: dict) -> dict:
+    """Propose a concrete fix for each requirement that failed or needs review.
+
+    Reads everything it needs from the validation output (each result already
+    carries the requirement's constraint, the design value, and the reviewer note).
+    """
     failing = [
         r for r in validation.get("results", [])
         if r.get("verdict") in ("fail", "needs_review")
@@ -408,9 +412,15 @@ def run_remediation(intent: str, formal_requirements: dict, validation: dict) ->
 
     design_summary = (validation.get("design") or {}).get("summary", "")
     issues = "\n".join(
-        f"  [{f.get('req_id')}] {f.get('statement', '')} "
-        f"(verdict: {f.get('verdict')}; design value: {f.get('design_value') or 'n/a'}; "
-        f"reviewer note: {f.get('rationale', '')})"
+        f"  [{f.get('req_id')}] {f.get('statement', '')}"
+        + (
+            f" (constraint: {f.get('parameter', '')} {f.get('operator', '')} "
+            f"{f.get('value', '')} {f.get('unit', '') or ''})"
+            if f.get("parameter")
+            else ""
+        )
+        + f" — verdict: {f.get('verdict')}; design value: {f.get('design_value') or 'n/a'}; "
+        + f"reviewer note: {f.get('rationale', '')}"
         for f in failing
     )
     prompt = (
