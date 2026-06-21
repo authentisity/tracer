@@ -19,7 +19,16 @@ async function post(path, body) {
     } catch {
       /* response had no JSON body */
     }
-    throw new Error(detail ? `${res.status} — ${detail}` : `${res.status} ${res.statusText}`)
+    const msg =
+      typeof detail === 'object' && detail?.message
+        ? detail.message
+        : typeof detail === 'string'
+        ? `${res.status} — ${detail}`
+        : `${res.status} ${res.statusText}`
+    const err = new Error(msg)
+    // Attach structured detail for callers that need it (e.g. ERC violations).
+    if (typeof detail === 'object') err.detail = detail
+    throw err
   }
   return res.json()
 }
@@ -29,9 +38,11 @@ export function createProject(name, intent) {
   return post('/projects', { name, intent })
 }
 
-// POST /projects/{id}/stage/{stage}  ->  { stage_id, output }
-// `body` is optional: intent/structured/formal/remediation take none; validation
-// accepts an optional { artifact }.
+// POST /projects/{id}/stage/{stage}  ->  stage output object
+// `body` is optional: intent/structured/formal/remediation/comp/netlist/placement take
+// none; validation accepts an optional { artifact }.
+// For the netlist stage a 422 ERC failure is rethrown with err.detail carrying
+// { erc_violations, partial_netlist }.
 export async function runStage(projectId, stage, body) {
   const res = await post(`/projects/${projectId}/stage/${stage}`, body)
   return res.output

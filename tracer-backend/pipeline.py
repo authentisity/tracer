@@ -2,7 +2,7 @@ import json
 import os
 import re
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from google import genai
 from google.genai import errors as genai_errors
