@@ -12,6 +12,12 @@ __pycache__/
 node_modules
 bower_components
 
+### build output / tooling caches ###
+dist
+dist-ssr
+.vite
+*.local
+
 *.sublime*
 
 psd
