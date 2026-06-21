@@ -25,7 +25,107 @@ const STAGE_DEFS = [
   { num: '01', label: 'Describe board', screen: 'prompt' },
   { num: '02', label: 'Intent analysis', screen: null },
   { num: '03', label: 'Structured requirements', screen: 'requirements' },
-  { num: '04', label: 'Formal specification', screen: null },
+  { num: '04', label: 'Design validation', screen: 'validation' },
+  { num: '05', label: 'Remediation', screen: 'remediation' },
+  { num: '06', label: 'Export report', screen: 'report' },
+]
+
+const SCREEN_STAGE = {
+  prompt: 1,
+  analyzing: 2,
+  requirements: 3,
+  validation: 4,
+  remediation: 5,
+  report: 6,
+}
+
+const DESIGN_SOURCES = [
+  {
+    key: 'ai',
+    label: 'AI-generated candidate',
+    hint: 'Let Tracer synthesize a candidate design straight from the formal spec.',
+  },
+  {
+    key: 'json',
+    label: 'Paste JSON',
+    hint: 'Paste a design description as a JSON object of populated parameters.',
+  },
+  {
+    key: 'bom',
+    label: 'BOM CSV',
+    hint: 'Drop in a bill of materials — Tracer maps line items to requirements.',
+  },
+  {
+    key: 'netlist',
+    label: 'KiCad netlist',
+    hint: 'Import a .net file exported from KiCad and validate against the spec.',
+  },
+]
+
+const CANDIDATE_DESIGN = `{
+  "design": "rev-c-power-mux candidate",
+  "source": "tracer-synthesized",
+  "input": { "range": "9-36 V", "connector": "USB-C" },
+  "rails": [
+    { "net": "VOUT", "v": 5.0, "i_max": 3.0 },
+    { "net": "V3V3", "v": 3.3, "i_max": 1.0 }
+  ],
+  "protection": { "reverse_polarity": "P-FET", "iq_typ_uA": 68 },
+  "interfaces": ["USB-C USB2.0 FS", "I2C @ 400kHz"],
+  "thermal": { "ambient_max_c": 70, "junction_margin_c": 12 },
+  "mechanical": { "outline_mm": "50 x 35", "debug": "none" }
+}`
+
+// status: 'pass' | 'warn' | 'fail'. fix only present on warn/fail.
+const VALIDATION_CHECKS = [
+  { id: 'PWR-01', title: 'Input voltage range', expected: '9 – 36 V DC', actual: '9 – 36 V', status: 'pass' },
+  { id: 'PWR-02', title: 'Primary output rail', expected: '5.0 V @ 3.0 A', actual: '5.0 V @ 3.0 A', status: 'pass' },
+  {
+    id: 'PWR-03',
+    title: 'Logic rail',
+    expected: '3.3 V @ 1.5 A',
+    actual: '3.3 V @ 1.0 A',
+    status: 'warn',
+    fix: 'Raise the buck inductor saturation rating to ≥ 2 A so V3V3 meets the 1.5 A spec.',
+  },
+  { id: 'PWR-04', title: 'Reverse-polarity protection', expected: 'Required · P-FET', actual: 'P-FET present', status: 'pass' },
+  {
+    id: 'PWR-05',
+    title: 'Quiescent current',
+    expected: '< 50 µA',
+    actual: '68 µA',
+    status: 'fail',
+    fix: 'Swap the always-on LDO for a TPS7A02 (25 nA Iq) to bring quiescent draw under 50 µA.',
+  },
+  { id: 'IF-01', title: 'Host link', expected: 'USB-C · USB 2.0 FS', actual: 'USB-C USB2.0 FS', status: 'pass' },
+  { id: 'IF-02', title: 'Control bus', expected: 'I²C @ 400 kHz', actual: 'I²C @ 400 kHz', status: 'pass' },
+  {
+    id: 'IF-03',
+    title: 'Debug port',
+    expected: 'SWD · 10-pin 1.27 mm',
+    actual: 'not populated',
+    status: 'warn',
+    fix: 'Add a 10-pin 1.27 mm SWD header at the board edge for programming and debug.',
+  },
+  {
+    id: 'CMP-01',
+    title: 'Buck converter',
+    expected: 'Sync · ≥ 90% eff',
+    actual: '88% eff @ 3 A',
+    status: 'warn',
+    fix: 'Select a sync buck rated ≥ 90% efficiency at 3 A (e.g. TPS62932).',
+  },
+  { id: 'SI-01', title: 'USB differential impedance', expected: '90 Ω ± 10%', actual: '90 Ω', status: 'pass' },
+  { id: 'TH-01', title: 'Max ambient', expected: '70 °C', actual: '70 °C rated', status: 'pass' },
+  {
+    id: 'TH-02',
+    title: 'Junction margin',
+    expected: '≥ 20 °C',
+    actual: '12 °C',
+    status: 'fail',
+    fix: 'Add a copper pour with thermal vias under U2 (or derate to 60 °C ambient) to recover ≥ 20 °C margin.',
+  },
+  { id: 'MEC-01', title: 'Board outline', expected: '50 × 35 mm', actual: '50 × 35 mm', status: 'pass' },
 ]
 
 const DEFAULT_BRIEF =
@@ -144,33 +244,107 @@ function formatCurrency(value) {
   return value.toString()
 }
 
+const STATUS_GLYPH = { pass: '✓', warn: '!', fail: '✕' }
+const STATUS_WORD = { pass: 'PASS', warn: 'WARN', fail: 'FAIL' }
+
+function buildReport(requirements, checks, applied) {
+  const now = new Date().toISOString().slice(0, 10)
+  const pass = checks.filter((c) => c.status === 'pass').length
+  const warn = checks.filter((c) => c.status === 'warn').length
+  const fail = checks.filter((c) => c.status === 'fail').length
+  const issues = checks.filter((c) => c.status !== 'pass')
+  const resolved = issues.filter((c) => applied[c.id]).length
+  const verdict = fail > 0 ? '❌ FAILED' : warn > 0 ? '⚠️ PASSED WITH WARNINGS' : '✅ PASSED'
+
+  const lines = []
+  lines.push('# Tracer — Design Validation Report')
+  lines.push('')
+  lines.push(`**Project:** rev-c-power-mux &nbsp;·&nbsp; **Revision:** C &nbsp;·&nbsp; **Generated:** ${now}`)
+  lines.push('')
+  lines.push(`**Verdict:** ${verdict}`)
+  lines.push('')
+  lines.push('## Summary')
+  lines.push('')
+  lines.push('| Metric | Count |')
+  lines.push('| --- | --- |')
+  lines.push(`| Requirements checked | ${checks.length} |`)
+  lines.push(`| Passed | ${pass} |`)
+  lines.push(`| Warnings | ${warn} |`)
+  lines.push(`| Failed | ${fail} |`)
+  lines.push(`| Issues resolved | ${resolved} / ${issues.length} |`)
+  lines.push('')
+  lines.push('## Validation Results')
+  lines.push('')
+  lines.push('| ID | Requirement | Expected | Actual | Result |')
+  lines.push('| --- | --- | --- | --- | --- |')
+  checks.forEach((c) => {
+    lines.push(`| ${c.id} | ${c.title} | ${c.expected} | ${c.actual} | ${STATUS_WORD[c.status]} |`)
+  })
+  lines.push('')
+  if (issues.length) {
+    lines.push('## Remediation')
+    lines.push('')
+    issues.forEach((c) => {
+      const mark = applied[c.id] ? '[x]' : '[ ]'
+      lines.push(`- ${mark} **${c.id} — ${c.title}** (${STATUS_WORD[c.status]})`)
+      lines.push(`  - Issue: expected ${c.expected}, got ${c.actual}.`)
+      if (c.fix) lines.push(`  - Fix: ${c.fix}`)
+    })
+    lines.push('')
+  }
+  lines.push('## Requirements Baseline')
+  lines.push('')
+  lines.push('| ID | Title | Value | Origin | Confidence |')
+  lines.push('| --- | --- | --- | --- | --- |')
+  requirements.forEach((r) => {
+    lines.push(`| ${r.id} | ${r.title} | ${r.value} | ${r.kind} | ${Math.round(r.conf * 100)}% |`)
+  })
+  lines.push('')
+  lines.push('---')
+  lines.push('_Generated by Tracer · requirements workbench_')
+  return lines.join('\n')
+}
+
 export default function App() {
   const [requirements, setRequirements] = useState(INITIAL_REQUIREMENTS)
   const [filter, setFilter] = useState('all')
   const [category, setCategory] = useState('all')
   const [screen, setScreen] = useState('prompt')
   const [brief, setBrief] = useState(DEFAULT_BRIEF)
-  const [formalized, setFormalized] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [designSource, setDesignSource] = useState('ai')
+  const [designText, setDesignText] = useState(CANDIDATE_DESIGN)
+  const [validated, setValidated] = useState(false)
+  const [appliedFixes, setAppliedFixes] = useState({})
+  const [reportDownloaded, setReportDownloaded] = useState(false)
   const timeoutRef = useRef(null)
   const analyzeRef = useRef(null)
+  const validateRef = useRef(null)
 
   useEffect(() => {
     return () => {
       clearTimeout(timeoutRef.current)
       clearTimeout(analyzeRef.current)
+      clearTimeout(validateRef.current)
     }
   }, [])
 
-  const stage = screen === 'prompt' ? 1 : screen === 'analyzing' ? 2 : formalized ? 4 : 3
+  const stage = SCREEN_STAGE[screen] || 1
+  const formalized = stage >= 4
   const statusText =
     screen === 'prompt'
       ? 'draft'
       : screen === 'analyzing'
       ? 'analyzing'
-      : formalized
-      ? 'formalized'
-      : 'structured'
+      : screen === 'requirements'
+      ? 'structured'
+      : screen === 'validation'
+      ? validated
+        ? 'validated'
+        : 'validating'
+      : screen === 'remediation'
+      ? 'remediating'
+      : 'complete'
 
   const handleAnalyze = () => {
     setScreen('analyzing')
@@ -189,11 +363,49 @@ export default function App() {
 
   const handleNewBoard = () => {
     clearTimeout(analyzeRef.current)
+    clearTimeout(validateRef.current)
     setBrief('')
-    setFormalized(false)
     setFilter('all')
     setCategory('all')
+    setValidated(false)
+    setAppliedFixes({})
+    setReportDownloaded(false)
     setScreen('prompt')
+  }
+
+  const handleSelectSource = (key) => {
+    setDesignSource(key)
+    setDesignText(key === 'ai' ? CANDIDATE_DESIGN : '')
+    setValidated(false)
+  }
+
+  const handleRunValidation = () => {
+    setValidated(false)
+    clearTimeout(validateRef.current)
+    validateRef.current = setTimeout(() => setValidated(true), 900)
+  }
+
+  const handleApplyFix = (id) => {
+    setAppliedFixes((current) => ({ ...current, [id]: !current[id] }))
+  }
+
+  const handleDownloadReport = () => {
+    try {
+      const blob = new Blob([reportMarkdown], { type: 'text/markdown' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = 'rev-c-power-mux.validation.md'
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      URL.revokeObjectURL(url)
+      setReportDownloaded(true)
+      clearTimeout(timeoutRef.current)
+      timeoutRef.current = setTimeout(() => setReportDownloaded(false), 1800)
+    } catch {
+      // ignore download failure
+    }
   }
 
   const total = requirements.length
@@ -244,6 +456,20 @@ export default function App() {
 
   const spec = useMemo(() => buildFormalSpec(requirements), [requirements])
   const jsonText = useMemo(() => JSON.stringify(spec, null, 2), [spec])
+
+  const checks = VALIDATION_CHECKS
+  const passCount = checks.filter((c) => c.status === 'pass').length
+  const warnCount = checks.filter((c) => c.status === 'warn').length
+  const failCount = checks.filter((c) => c.status === 'fail').length
+  const issues = checks.filter((c) => c.status !== 'pass')
+  const resolvedCount = issues.filter((c) => appliedFixes[c.id]).length
+  const verdict =
+    failCount > 0 ? 'failed' : warnCount > 0 ? 'passed-warn' : 'passed'
+
+  const reportMarkdown = useMemo(
+    () => buildReport(requirements, checks, appliedFixes),
+    [requirements, checks, appliedFixes]
+  )
 
   const copyJson = async () => {
     try {
@@ -312,8 +538,46 @@ export default function App() {
             <button className="btn btn-ghost" onClick={copyJson}>
               {copied ? 'Copied ✓' : 'Export JSON'}
             </button>
-            <button className="btn btn-primary" onClick={() => setFormalized(true)}>
-              Formalize spec →
+            <button className="btn btn-primary" onClick={() => setScreen('validation')}>
+              Validate design →
+            </button>
+          </>
+        )}
+
+        {screen === 'validation' && (
+          <>
+            <button className="btn btn-ghost" onClick={() => setScreen('requirements')}>
+              ← Requirements
+            </button>
+            {validated && (
+              <button
+                className="btn btn-primary"
+                onClick={() => setScreen(issues.length ? 'remediation' : 'report')}
+              >
+                {issues.length ? 'Remediate →' : 'Export report →'}
+              </button>
+            )}
+          </>
+        )}
+
+        {screen === 'remediation' && (
+          <>
+            <button className="btn btn-ghost" onClick={() => setScreen('validation')}>
+              ← Validation
+            </button>
+            <button className="btn btn-primary" onClick={() => setScreen('report')}>
+              Export report →
+            </button>
+          </>
+        )}
+
+        {screen === 'report' && (
+          <>
+            <button className="btn btn-ghost" onClick={() => setScreen('remediation')}>
+              ← Remediation
+            </button>
+            <button className="btn btn-primary" onClick={handleDownloadReport}>
+              {reportDownloaded ? 'Downloaded ✓' : 'Download .md'}
             </button>
           </>
         )}
@@ -598,6 +862,220 @@ export default function App() {
           </div>
         </aside>
       </div>
+      )}
+
+      {screen === 'validation' && (
+        <div className="flow-screen">
+          <div className="flow-inner">
+            <div className="prompt-eyebrow">STAGE 04 · DESIGN VALIDATION</div>
+            <h1 className="prompt-title">Validate a design</h1>
+            <p className="prompt-lede">
+              Check a candidate design against the {checks.length} structured requirements. Pick a
+              source, then run validation to see what passes, what needs attention, and what fails.
+            </p>
+
+            <div className="source-grid">
+              {DESIGN_SOURCES.map((source) => (
+                <button
+                  key={source.key}
+                  type="button"
+                  className={`source-card ${designSource === source.key ? 'source-card--active' : ''}`}
+                  onClick={() => handleSelectSource(source.key)}
+                >
+                  <span className="source-card-label">{source.label}</span>
+                  <span className="source-card-hint">{source.hint}</span>
+                </button>
+              ))}
+            </div>
+
+            <div className="prompt-card">
+              <textarea
+                className="prompt-textarea"
+                value={designText}
+                onChange={(event) => {
+                  setDesignText(event.target.value)
+                  setValidated(false)
+                }}
+                spellCheck={false}
+                placeholder={
+                  designSource === 'bom'
+                    ? 'ref,part,value,qty\nU1,TPS54331,buck,1\n…'
+                    : designSource === 'netlist'
+                    ? '(export (version "E")\n  (components …))'
+                    : 'Paste the candidate design here…'
+                }
+              />
+              <div className="prompt-card-footer">
+                <span className="prompt-count">
+                  Source: {DESIGN_SOURCES.find((s) => s.key === designSource)?.label}
+                </span>
+                <div className="spacer" />
+                <span className="prompt-count">{designText.length} chars</span>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={handleRunValidation}
+                  disabled={!designText.trim()}
+                >
+                  Run validation →
+                </button>
+              </div>
+            </div>
+
+            {validated && (
+              <div className="validation-results">
+                <div className={`verdict-banner verdict-banner--${verdict}`}>
+                  <span className="verdict-mark">
+                    {verdict === 'passed' ? '✓' : verdict === 'failed' ? '✕' : '!'}
+                  </span>
+                  <div>
+                    <div className="verdict-title">
+                      {verdict === 'passed'
+                        ? 'All requirements satisfied'
+                        : verdict === 'failed'
+                        ? `${failCount} requirement${failCount === 1 ? '' : 's'} failed`
+                        : `Passed with ${warnCount} warning${warnCount === 1 ? '' : 's'}`}
+                    </div>
+                    <div className="verdict-sub">
+                      {passCount} passed · {warnCount} warnings · {failCount} failed
+                    </div>
+                  </div>
+                </div>
+
+                <div className="check-list">
+                  {checks.map((check) => (
+                    <div key={check.id} className={`check-row check-row--${check.status}`}>
+                      <span className={`check-icon check-icon--${check.status}`}>
+                        {STATUS_GLYPH[check.status]}
+                      </span>
+                      <div className="check-body">
+                        <div className="check-top">
+                          <span className="check-id">{check.id}</span>
+                          <span className="check-title">{check.title}</span>
+                        </div>
+                        <div className="check-compare">
+                          <span className="check-expected">expected {check.expected}</span>
+                          <span className="check-arrow">→</span>
+                          <span className="check-actual">got {check.actual}</span>
+                        </div>
+                      </div>
+                      <span className={`check-tag check-tag--${check.status}`}>
+                        {STATUS_WORD[check.status]}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {screen === 'remediation' && (
+        <div className="flow-screen">
+          <div className="flow-inner">
+            <div className="prompt-eyebrow">STAGE 05 · REMEDIATION</div>
+            <h1 className="prompt-title">Suggested fixes</h1>
+            <p className="prompt-lede">
+              {issues.length
+                ? `Tracer found ${issues.length} issue${issues.length === 1 ? '' : 's'}. Apply the suggested fixes below, then move on to the report.`
+                : 'No failures or warnings — nothing to remediate. Head straight to the report.'}
+            </p>
+
+            {issues.length > 0 && (
+              <div className="remediation-meta">
+                <span className="remediation-progress">
+                  {resolvedCount} of {issues.length} resolved
+                </span>
+                <div className="remediation-track">
+                  <div
+                    className="remediation-fill"
+                    style={{ width: `${issues.length ? (resolvedCount / issues.length) * 100 : 0}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            <div className="fix-list">
+              {issues.map((item) => {
+                const isApplied = Boolean(appliedFixes[item.id])
+                return (
+                  <div key={item.id} className={`fix-card ${isApplied ? 'fix-card--applied' : ''}`}>
+                    <div className="fix-head">
+                      <span className={`check-tag check-tag--${item.status}`}>
+                        {STATUS_WORD[item.status]}
+                      </span>
+                      <span className="check-id">{item.id}</span>
+                      <span className="fix-title">{item.title}</span>
+                      <div className="spacer" />
+                      <button
+                        type="button"
+                        className={`fix-btn ${isApplied ? 'fix-btn--applied' : ''}`}
+                        onClick={() => handleApplyFix(item.id)}
+                      >
+                        {isApplied ? 'Applied ✓' : 'Apply fix'}
+                      </button>
+                    </div>
+                    <div className="fix-issue">
+                      Expected {item.expected} · got {item.actual}
+                    </div>
+                    <div className="fix-suggestion">{item.fix}</div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {screen === 'report' && (
+        <div className="flow-screen">
+          <div className="flow-inner">
+            <div className="prompt-eyebrow">STAGE 06 · EXPORT REPORT</div>
+            <h1 className="prompt-title">Validation report</h1>
+            <p className="prompt-lede">
+              The full result — requirements, validation outcomes, and remediation — as a Markdown
+              report you can download and share.
+            </p>
+
+            <div className="report-stats">
+              <div className="report-stat">
+                <span className="report-stat-value">{checks.length}</span>
+                <span className="report-stat-label">checked</span>
+              </div>
+              <div className="report-stat">
+                <span className="report-stat-value report-stat-value--green">{passCount}</span>
+                <span className="report-stat-label">passed</span>
+              </div>
+              <div className="report-stat">
+                <span className="report-stat-value report-stat-value--amber">{warnCount}</span>
+                <span className="report-stat-label">warnings</span>
+              </div>
+              <div className="report-stat">
+                <span className="report-stat-value report-stat-value--red">{failCount}</span>
+                <span className="report-stat-label">failed</span>
+              </div>
+              <div className="report-stat">
+                <span className="report-stat-value">
+                  {resolvedCount}/{issues.length}
+                </span>
+                <span className="report-stat-label">resolved</span>
+              </div>
+            </div>
+
+            <div className="report-panel">
+              <div className="report-panel-header">
+                <div className="spec-dot" />
+                <span className="spec-filename">rev-c-power-mux.validation.md</span>
+                <div className="spacer" />
+                <button type="button" className="btn btn-primary report-dl" onClick={handleDownloadReport}>
+                  {reportDownloaded ? 'Downloaded ✓' : 'Download .md'}
+                </button>
+              </div>
+              <pre className="report-pre">{reportMarkdown}</pre>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

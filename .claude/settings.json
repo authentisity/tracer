@@ -8,7 +8,13 @@
       "Bash(./node_modules/.bin/vite --version)",
       "Bash(sed -n '/\\\\.main-content {/,/}/p' src/App.css)",
       "Bash(sed -n '/\\\\.content-header {/,/}/p' src/App.css)",
-      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:5173/)"
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:5173/)",
+      "Bash(sed -n '/:root {/,/}/p' src/App.css)",
+      "Bash(sed -n '/^\\\\.btn {/,/^}/p;/\\\\.btn-ghost {/,/^}/p;/\\\\.btn-primary {/,/^}/p' src/App.css)",
+      "Bash(cd /Users/kchhim/Documents/GitHub/tracer/tracer-frontend *)"
+    ],
+    "additionalDirectories": [
+      "/tmp"
     ]
   }
 }
