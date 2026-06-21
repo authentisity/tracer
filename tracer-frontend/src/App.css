@@ -1056,3 +1056,26 @@ textarea:focus-visible {
   color: var(--text-dim);
   line-height: 1.5;
 }
+
+/* ── Stage 5: Remediation ────────────────────────────────────────────────────── */
+.remediation-clear {
+  color: var(--success);
+  font-weight: 600;
+  padding: 12px 0;
+}
+.fix-type {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--copper);
+  border: 1px solid var(--copper-dim);
+  background: var(--copper-glow);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+}
+.fix-suggestion {
+  margin-top: 8px;
+  font-size: 0.9rem;
+  color: var(--text);
+  line-height: 1.5;
+}
