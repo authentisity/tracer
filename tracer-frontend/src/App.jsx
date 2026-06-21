@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-
-// ── API layer ──────────────────────────────────────────────────────────────────
+import { useState, useCallback, useEffect, useRef } from 'react'
 
 const API = 'http://localhost:8000'
+
+// ── API helpers ──────────────────────────────────────────────────────────────
 
 async function apiFetch(path, options = {}) {
   const res = await fetch(`${API}${path}`, {
@@ -19,634 +19,784 @@ async function apiFetch(path, options = {}) {
 const api = {
   createProject: (name, intent) =>
     apiFetch('/projects', { method: 'POST', body: JSON.stringify({ name, intent }) }),
+  getProject: (id) => apiFetch(`/projects/${id}`),
   runStage: (projectId, stageName) =>
     apiFetch(`/projects/${projectId}/stage/${stageName}`, { method: 'POST' }),
+  revise: (stageId, editedOutput, note) =>
+    apiFetch(`/stages/${stageId}/revise`, {
+      method: 'POST',
+      body: JSON.stringify({ edited_output: editedOutput, note }),
+    }),
 }
 
-// ── Constants ─────────────────────────────────────────────────────────────────
+// ── Constants ────────────────────────────────────────────────────────────────
+
+const STAGES = [
+  {
+    key: 'intent_expansion',
+    label: 'Intent Analysis',
+    shortLabel: 'Intent',
+    description: 'Understand and expand your description',
+  },
+  {
+    key: 'structured_bullets',
+    label: 'Structured Requirements',
+    shortLabel: 'Requirements',
+    description: 'Organise into categories with provenance',
+  },
+  {
+    key: 'formal_requirements',
+    label: 'Formal Specification',
+    shortLabel: 'Formal Spec',
+    description: 'Machine-readable spec with test criteria',
+  },
+]
+
+const STAGE_ENDPOINT = {
+  intent_expansion: 'intent_expansion',
+  structured_bullets: 'structured_bullets',
+  formal_requirements: 'formal_requirements',
+}
 
 const CATEGORY_LABELS = {
   power: 'Power',
   interfaces: 'Interfaces',
   components: 'Components',
-  signal: 'Signal Integrity',
+  signal_integrity: 'Signal Integrity',
   thermal: 'Thermal',
   mechanical: 'Mechanical',
   placement: 'Placement',
+  other: 'Other',
 }
 
-const CATEGORY_ORDER = ['power', 'interfaces', 'components', 'signal', 'thermal', 'mechanical', 'placement']
+// ── Small primitives ─────────────────────────────────────────────────────────
 
-const STAGE_DEFS = [
-  { num: '01', label: 'Describe board', screen: 'prompt' },
-  { num: '02', label: 'Intent analysis', screen: null },
-  { num: '03', label: 'Structured requirements', screen: 'requirements' },
-  { num: '04', label: 'Formal specification', screen: null },
-]
-
-const DEFAULT_BRIEF =
-  'Small USB-C powered mux board. 9–36 V input, needs 5 V at 3 A out. Talks I²C to a host controller. Must fit a 50 × 35 mm enclosure and run up to 70 °C ambient.'
-
-const STARTERS = {
-  mux: DEFAULT_BRIEF,
-  ble: 'Compact BLE sensor node. Coin-cell powered (CR2032), reads a BME280 over I²C, advertises every 2 s. Chip antenna on board, fits a 25 mm round PCB, indoor use.',
-  motor: 'Brushed DC motor driver. 12 V supply, up to 5 A continuous. STM32 control over CAN, current sense and thermal shutdown. 60 × 40 mm board, automotive cabin.',
+function ProvenanceTag({ provenance }) {
+  return (
+    <span className={`provenance-tag provenance-${provenance}`}>
+      {provenance === 'user_stated' ? 'stated' : 'inferred'}
+    </span>
+  )
 }
 
-const STARTER_OPTIONS = [
-  { key: 'mux', label: 'USB-C power mux' },
-  { key: 'ble', label: 'BLE sensor node' },
-  { key: 'motor', label: 'DC motor driver' },
-]
-
-const EXTRACT_TAGS = ['Power', 'Interfaces', 'Components', 'Signal Integrity', 'Thermal', 'Mechanical', 'Placement']
-
-const ANALYZING_STEPS = [
-  'Parsing description',
-  'Classifying by domain',
-  'Extracting stated values',
-  'Inferring gaps',
-]
-
-// ── Data helpers ──────────────────────────────────────────────────────────────
-
-const CAT_KEY_MAP = { signal_integrity: 'signal' }
-
-function mapCatKey(cat) {
-  return CAT_KEY_MAP[cat] ?? cat
+function StatusDot({ status }) {
+  return <span className={`status-dot status-${status}`} aria-label={status} />
 }
 
-function deriveProjectName(brief) {
-  const slug = brief
-    .trim()
-    .split(/\s+/)
-    .slice(0, 5)
-    .join('-')
-    .toLowerCase()
-    .replace(/[^a-z0-9-]/g, '')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-  return slug || 'untitled'
+function Spinner() {
+  return <span className="spinner" aria-label="Running" />
 }
 
-function buildValueString(req) {
-  const parts = []
-  if (req.parameter) parts.push(req.parameter)
-  if (req.operator) parts.push(req.operator)
-  if (req.value != null) parts.push(String(req.value))
-  if (req.unit) parts.push(req.unit)
-  return parts.length > 0 ? parts.join(' ') : req.statement
+function ErrorBanner({ message, onDismiss }) {
+  return (
+    <div className="error-banner" role="alert">
+      <span className="error-icon">!</span>
+      <span className="error-text">{message}</span>
+      {onDismiss && (
+        <button className="error-dismiss" onClick={onDismiss} aria-label="Dismiss error">
+          ×
+        </button>
+      )}
+    </div>
+  )
 }
 
-function mapRequirements(formalReqs) {
-  return (formalReqs ?? []).map((req) => ({
-    id: req.id,
-    cat: mapCatKey(req.category),
-    title: req.statement,
-    value: buildValueString(req),
-    kind: req.provenance === 'user_stated' ? 'stated' : 'inferred',
-    conf: req.confidence ?? (req.provenance === 'user_stated' ? 0.93 : 0.68),
-  }))
+// ── Stage rail ───────────────────────────────────────────────────────────────
+
+function StageRail({ stages, activeStageKey, onSelectStage, isMobile }) {
+  return (
+    <nav className={`stage-rail ${isMobile ? 'stage-rail--mobile' : ''}`} aria-label="Pipeline stages">
+      {STAGES.map((stageDef, idx) => {
+        const stage = stages.find((s) => s.stage_type === stageDef.key)
+        const status = stage?.status ?? 'pending'
+        const isActive = stageDef.key === activeStageKey
+        const isClickable = !!stage
+
+        return (
+          <div key={stageDef.key} className="rail-item-wrapper">
+            {idx > 0 && <div className={`rail-trace ${status !== 'pending' ? 'rail-trace--lit' : ''}`} aria-hidden="true" />}
+            <button
+              className={`rail-node ${isActive ? 'rail-node--active' : ''} ${isClickable ? 'rail-node--clickable' : ''}`}
+              onClick={() => isClickable && onSelectStage(stageDef.key)}
+              disabled={!isClickable}
+              aria-current={isActive ? 'step' : undefined}
+            >
+              <div className="rail-node-circle">
+                {status === 'running' ? (
+                  <Spinner />
+                ) : status === 'complete' ? (
+                  <span className="rail-check" aria-hidden="true">✓</span>
+                ) : status === 'failed' ? (
+                  <span className="rail-fail" aria-hidden="true">✕</span>
+                ) : (
+                  <span className="rail-index" aria-hidden="true">{idx + 1}</span>
+                )}
+              </div>
+              <div className="rail-node-label">
+                <span className="rail-label-main">{isMobile ? stageDef.shortLabel : stageDef.label}</span>
+                {!isMobile && <span className="rail-label-sub">{stageDef.description}</span>}
+              </div>
+            </button>
+          </div>
+        )
+      })}
+    </nav>
+  )
 }
 
-function getConfidenceColor(conf) {
-  if (conf >= 0.85) return '#3f7d57'
-  if (conf >= 0.7) return '#c2620e'
-  return '#cf9134'
-}
+// ── Stage 1: Intent Expansion ────────────────────────────────────────────────
 
-function getBarStyle(conf) {
-  return {
-    width: `${Math.round(conf * 100)}%`,
-    background: getConfidenceColor(conf),
-  }
-}
+function IntentExpansionOutput({ output, onEdit }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const textareaRef = useRef(null)
 
-function buildFormalSpec(requirements, projectName) {
-  const now = new Date().toISOString().slice(0, 10)
-  const grouped = {}
-  requirements.forEach((req) => {
-    if (!grouped[req.cat]) grouped[req.cat] = []
-    grouped[req.cat].push({
-      id: req.id,
-      title: req.title,
-      value: req.value,
-      origin: req.kind,
-      confidence: Number(req.conf.toFixed(2)),
-    })
-  })
-
-  const output = {
-    project: projectName || 'untitled',
-    revision: 'A',
-    generated: now,
-    summary: {
-      total: requirements.length,
-      stated: requirements.filter((r) => r.kind === 'stated').length,
-      inferred: requirements.filter((r) => r.kind === 'inferred').length,
-      confidence: Number(
-        (requirements.reduce((sum, r) => sum + r.conf, 0) / (requirements.length || 1)).toFixed(2)
-      ),
-    },
-    requirements: {},
+  function startEdit() {
+    setDraft(JSON.stringify(output, null, 2))
+    setEditing(true)
   }
 
-  CATEGORY_ORDER.forEach((cat) => {
-    if (grouped[cat]) output.requirements[cat] = grouped[cat]
-  })
-
-  return output
-}
-
-// ── App ───────────────────────────────────────────────────────────────────────
-
-export default function App() {
-  const [screen, setScreen] = useState('prompt')
-  const [brief, setBrief] = useState(DEFAULT_BRIEF)
-  const [projectName, setProjectName] = useState('')
-  const [requirements, setRequirements] = useState([])
-  const [completedSteps, setCompletedSteps] = useState(0)
-  const [analyzeError, setAnalyzeError] = useState(null)
-  const [filter, setFilter] = useState('all')
-  const [category, setCategory] = useState('all')
-  const [formalized, setFormalized] = useState(false)
-  const [copied, setCopied] = useState(false)
-  const timeoutRef = useRef(null)
-
-  useEffect(() => () => clearTimeout(timeoutRef.current), [])
-
-  const stage = screen === 'prompt' ? 1 : screen === 'analyzing' ? 2 : formalized ? 4 : 3
-  const statusText =
-    screen === 'prompt'
-      ? 'draft'
-      : screen === 'analyzing'
-      ? 'analyzing'
-      : formalized
-      ? 'formalized'
-      : 'structured'
-
-  const handleAnalyze = async () => {
-    if (!brief.trim()) return
-    setScreen('analyzing')
-    setCompletedSteps(0)
-    setAnalyzeError(null)
-    setFormalized(false)
-    setFilter('all')
-    setCategory('all')
-
+  function handleSave() {
     try {
-      const name = deriveProjectName(brief)
-      setProjectName(name)
-
-      const { project_id } = await api.createProject(name, brief)
-      setCompletedSteps(1)
-
-      await api.runStage(project_id, 'intent_expansion')
-      setCompletedSteps(2)
-
-      await api.runStage(project_id, 'structured_bullets')
-      setCompletedSteps(3)
-
-      const { output: formalOut } = await api.runStage(project_id, 'formal_requirements')
-      setCompletedSteps(4)
-
-      setRequirements(mapRequirements(formalOut.requirements))
-      setScreen('requirements')
-    } catch (err) {
-      setAnalyzeError(err.message)
-      setScreen('prompt')
+      const parsed = JSON.parse(draft)
+      onEdit(parsed)
+      setEditing(false)
+    } catch {
+      // keep editing — parse error
     }
   }
 
-  const handleStageClick = (targetScreen) => {
-    if (!targetScreen || screen === 'analyzing') return
-    if (targetScreen === 'requirements' && requirements.length === 0) return
-    setScreen(targetScreen)
-  }
+  useEffect(() => {
+    if (editing && textareaRef.current) textareaRef.current.focus()
+  }, [editing])
 
-  const handleToggleKind = (id) => {
-    setRequirements((current) =>
-      current.map((req) => {
-        if (req.id !== id) return req
-        if (req.kind === 'stated') {
-          return { ...req, kind: 'inferred', conf: Math.max(0.5, req.conf - 0.2) }
-        }
-        return { ...req, kind: 'stated', conf: Math.min(0.99, req.conf + 0.2) }
-      })
+  if (editing) {
+    return (
+      <div className="edit-block">
+        <label className="edit-label" htmlFor="intent-edit">
+          Edit analysis output (JSON)
+        </label>
+        <textarea
+          id="intent-edit"
+          ref={textareaRef}
+          className="edit-textarea mono"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          rows={20}
+          spellCheck={false}
+        />
+        <div className="edit-actions">
+          <button className="btn btn--primary" onClick={handleSave}>
+            Save changes
+          </button>
+          <button className="btn btn--ghost" onClick={() => setEditing(false)}>
+            Cancel
+          </button>
+        </div>
+      </div>
     )
   }
 
-  const handleValueChange = (id, value) => {
-    setRequirements((current) => current.map((req) => (req.id === id ? { ...req, value } : req)))
-  }
-
-  const total = requirements.length
-  const statedCount = requirements.filter((r) => r.kind === 'stated').length
-  const inferredCount = total - statedCount
-  const averageConfidence =
-    total > 0 ? requirements.reduce((acc, req) => acc + req.conf, 0) / total : 0
-  const overallPct = `${Math.round(averageConfidence * 100)}%`
-  const overallBar = {
-    width: `${Math.round(averageConfidence * 100)}%`,
-    background: getConfidenceColor(averageConfidence),
-  }
-  const summarySub = `${total} extracted · ${statedCount} stated · ${inferredCount} inferred`
-
-  const activeFilters = [
-    { key: 'all', text: `All ${total}` },
-    { key: 'stated', text: `Stated ${statedCount}` },
-    { key: 'inferred', text: `Inferred ${inferredCount}` },
-  ]
-
-  const categoryChips = useMemo(() => {
-    const chips = [{ key: 'all', text: `All ${total}` }]
-    CATEGORY_ORDER.forEach((key) => {
-      const count = requirements.filter((r) => r.cat === key).length
-      if (count > 0) chips.push({ key, text: `${CATEGORY_LABELS[key]} ${count}` })
-    })
-    return chips
-  }, [requirements, total])
-
-  const groups = useMemo(() => {
-    const filtered = requirements.filter((req) => {
-      if (filter !== 'all' && req.kind !== filter) return false
-      if (category !== 'all' && req.cat !== category) return false
-      return true
-    })
-    const result = []
-    const categories = category === 'all' ? CATEGORY_ORDER : [category]
-    categories.forEach((cat) => {
-      const items = filtered.filter((req) => req.cat === cat)
-      if (items.length > 0) result.push({ label: CATEGORY_LABELS[cat] ?? cat, count: items.length, items })
-    })
-    return result
-  }, [requirements, filter, category])
-
-  const inferredAssumptions = useMemo(
-    () => requirements.filter((r) => r.kind === 'inferred').slice(0, 5),
-    [requirements]
+  return (
+    <div className="stage-output">
+      <div className="output-field">
+        <h3 className="output-field-label">Restated goal</h3>
+        <p className="output-prose">{output.restated_goal}</p>
+      </div>
+      <div className="output-field">
+        <h3 className="output-field-label">Functional description</h3>
+        <p className="output-prose">{output.functional_description}</p>
+      </div>
+      <div className="output-field">
+        <h3 className="output-field-label">Inferred context</h3>
+        <p className="output-prose">{output.inferred_context}</p>
+      </div>
+      {output.open_questions?.length > 0 && (
+        <div className="output-field">
+          <h3 className="output-field-label output-field-label--warn">
+            Open questions
+            <span className="flag-count">{output.open_questions.length}</span>
+          </h3>
+          <ul className="open-questions">
+            {output.open_questions.map((q, i) => (
+              <li key={i} className="open-question">
+                <span className="question-bullet" aria-hidden="true">?</span>
+                <span>{q}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <div className="output-actions">
+        <button className="btn btn--ghost btn--sm" onClick={startEdit}>
+          Edit assumptions
+        </button>
+      </div>
+    </div>
   )
+}
 
-  const spec = useMemo(() => buildFormalSpec(requirements, projectName), [requirements, projectName])
-  const jsonText = useMemo(() => JSON.stringify(spec, null, 2), [spec])
+// ── Stage 2: Structured Bullets ──────────────────────────────────────────────
 
-  const copyJson = async () => {
+function StructuredBulletsOutput({ output, onEdit }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const textareaRef = useRef(null)
+
+  function startEdit() {
+    setDraft(JSON.stringify(output, null, 2))
+    setEditing(true)
+  }
+
+  function handleSave() {
     try {
-      await navigator.clipboard.writeText(jsonText)
-      setCopied(true)
-      clearTimeout(timeoutRef.current)
-      timeoutRef.current = setTimeout(() => setCopied(false), 1600)
+      const parsed = JSON.parse(draft)
+      onEdit(parsed)
+      setEditing(false)
     } catch {
-      // ignore clipboard failure
+      // keep editing
     }
   }
 
-  const footerNote = formalized
-    ? 'Specification formalized · ready for export'
-    : 'Regenerated live from current requirements'
+  useEffect(() => {
+    if (editing && textareaRef.current) textareaRef.current.focus()
+  }, [editing])
+
+  if (editing) {
+    return (
+      <div className="edit-block">
+        <label className="edit-label" htmlFor="bullets-edit">
+          Edit structured requirements (JSON)
+        </label>
+        <textarea
+          id="bullets-edit"
+          ref={textareaRef}
+          className="edit-textarea mono"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          rows={24}
+          spellCheck={false}
+        />
+        <div className="edit-actions">
+          <button className="btn btn--primary" onClick={handleSave}>
+            Save changes
+          </button>
+          <button className="btn btn--ghost" onClick={() => setEditing(false)}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  const grouped = {}
+  for (const bullet of output.bullets ?? []) {
+    const cat = bullet.category ?? 'other'
+    if (!grouped[cat]) grouped[cat] = []
+    grouped[cat].push(bullet)
+  }
+
+  return (
+    <div className="stage-output">
+      {Object.entries(grouped).map(([category, bullets]) => (
+        <div key={category} className="bullet-category">
+          <h3 className="bullet-category-label">{CATEGORY_LABELS[category] ?? category}</h3>
+          <ul className="bullet-list">
+            {bullets.map((b, i) => (
+              <li key={i} className="bullet-item">
+                <div className="bullet-header">
+                  <ProvenanceTag provenance={b.provenance} />
+                  <span className="bullet-text">{b.text}</span>
+                </div>
+                {b.rationale && (
+                  <p className="bullet-rationale">
+                    <span className="rationale-label">AI reasoning:</span> {b.rationale}
+                  </p>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+      <div className="output-actions">
+        <button className="btn btn--ghost btn--sm" onClick={startEdit}>
+          Edit requirements
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ── Stage 3: Formal Requirements ─────────────────────────────────────────────
+
+function FormalRequirementsOutput({ output, onEdit }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const textareaRef = useRef(null)
+
+  function startEdit() {
+    setDraft(JSON.stringify(output, null, 2))
+    setEditing(true)
+  }
+
+  function handleSave() {
+    try {
+      const parsed = JSON.parse(draft)
+      onEdit(parsed)
+      setEditing(false)
+    } catch {
+      // keep editing
+    }
+  }
+
+  useEffect(() => {
+    if (editing && textareaRef.current) textareaRef.current.focus()
+  }, [editing])
+
+  if (editing) {
+    return (
+      <div className="edit-block">
+        <label className="edit-label" htmlFor="formal-edit">
+          Edit formal specification (JSON)
+        </label>
+        <textarea
+          id="formal-edit"
+          ref={textareaRef}
+          className="edit-textarea mono"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          rows={28}
+          spellCheck={false}
+        />
+        <div className="edit-actions">
+          <button className="btn btn--primary" onClick={handleSave}>
+            Save changes
+          </button>
+          <button className="btn btn--ghost" onClick={() => setEditing(false)}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  const grouped = {}
+  for (const req of output.requirements ?? []) {
+    const cat = req.category ?? 'other'
+    if (!grouped[cat]) grouped[cat] = []
+    grouped[cat].push(req)
+  }
+
+  return (
+    <div className="stage-output">
+      {Object.entries(grouped).map(([category, reqs]) => (
+        <div key={category} className="req-category">
+          <h3 className="bullet-category-label">{CATEGORY_LABELS[category] ?? category}</h3>
+          {reqs.map((req) => (
+            <div key={req.id} className="req-card">
+              <div className="req-card-header">
+                <span className="mono req-id">{req.id}</span>
+                <ProvenanceTag provenance={req.provenance} />
+              </div>
+              <p className="req-statement">{req.statement}</p>
+              {(req.parameter || req.value != null) && (
+                <div className="req-spec-row">
+                  {req.parameter && <span className="mono req-spec-part">{req.parameter}</span>}
+                  {req.operator && <span className="mono req-spec-op">{req.operator}</span>}
+                  {req.value != null && <span className="mono req-spec-part">{req.value}</span>}
+                  {req.unit && <span className="mono req-spec-unit">{req.unit}</span>}
+                </div>
+              )}
+              {req.verification_method && (
+                <div className="req-verify">
+                  <span className="req-verify-label">Verify by:</span>
+                  <span className="mono">{req.verification_method}</span>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      ))}
+      <div className="output-actions">
+        <button className="btn btn--ghost btn--sm" onClick={startEdit}>
+          Edit specification
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ── Stage panel ──────────────────────────────────────────────────────────────
+
+function StagePanel({ stageDef, stage, projectId, onStageComplete, onRevise }) {
+  const [running, setRunning] = useState(false)
+  const [error, setError] = useState(null)
+  const [savingRevision, setSavingRevision] = useState(false)
+  const [revisionSaved, setRevisionSaved] = useState(false)
+  const pendingEditRef = useRef(null)
+
+  const status = stage?.status ?? 'pending'
+  const output = stage?.output_json ?? null
+  const stageError = stage?.error ?? null
+
+  async function runStage() {
+    setError(null)
+    setRunning(true)
+    try {
+      const result = await api.runStage(projectId, STAGE_ENDPOINT[stageDef.key])
+      onStageComplete(stageDef.key, result)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  async function handleEdit(editedOutput) {
+    if (!stage?.id) {
+      // stage not saved yet — shouldn't happen, but guard anyway
+      return
+    }
+    pendingEditRef.current = editedOutput
+    setSavingRevision(true)
+    setRevisionSaved(false)
+    try {
+      await api.revise(stage.id, editedOutput, 'User override via UI')
+      onRevise(stageDef.key, editedOutput)
+      setRevisionSaved(true)
+      setTimeout(() => setRevisionSaved(false), 3000)
+    } catch (err) {
+      setError(`Could not save revision: ${err.message}`)
+    } finally {
+      setSavingRevision(false)
+    }
+  }
+
+  const canRun = status === 'pending' || status === 'failed'
+  const isRunning = status === 'running' || running
+
+  return (
+    <section className="stage-panel" aria-label={stageDef.label}>
+      <div className="stage-panel-header">
+        <div className="stage-panel-title-row">
+          <StatusDot status={isRunning ? 'running' : status} />
+          <h2 className="stage-panel-title">{stageDef.label}</h2>
+        </div>
+        <p className="stage-panel-desc">{stageDef.description}</p>
+      </div>
+
+      {error && <ErrorBanner message={error} onDismiss={() => setError(null)} />}
+
+      {(stageError && status === 'failed') && (
+        <ErrorBanner
+          message={`Analysis failed: ${stageError}. Check your board description and try again.`}
+        />
+      )}
+
+      {savingRevision && (
+        <div className="saving-banner">
+          <Spinner /> Saving your changes…
+        </div>
+      )}
+
+      {revisionSaved && (
+        <div className="saved-banner" role="status">
+          Changes saved — downstream stages will use your version.
+        </div>
+      )}
+
+      {status === 'pending' && !isRunning && (
+        <div className="stage-empty">
+          <div className="stage-empty-icon" aria-hidden="true">◈</div>
+          <p className="stage-empty-text">
+            {stageDef.key === 'intent_expansion'
+              ? 'Ready to analyse your board description.'
+              : stageDef.key === 'structured_bullets'
+              ? 'Complete Intent Analysis first, then run this stage.'
+              : 'Complete Structured Requirements first, then run this stage.'}
+          </p>
+          <button
+            className="btn btn--primary"
+            onClick={runStage}
+            disabled={isRunning}
+          >
+            Run analysis
+          </button>
+        </div>
+      )}
+
+      {isRunning && (
+        <div className="stage-running">
+          <Spinner />
+          <p className="stage-running-text">Analysing — this takes a few seconds…</p>
+        </div>
+      )}
+
+      {status === 'complete' && output && (
+        <>
+          {stageDef.key === 'intent_expansion' && (
+            <IntentExpansionOutput output={output} onEdit={handleEdit} />
+          )}
+          {stageDef.key === 'structured_bullets' && (
+            <StructuredBulletsOutput output={output} onEdit={handleEdit} />
+          )}
+          {stageDef.key === 'formal_requirements' && (
+            <FormalRequirementsOutput output={output} onEdit={handleEdit} />
+          )}
+          {canRun && (
+            <div className="output-actions">
+              <button className="btn btn--ghost btn--sm" onClick={runStage} disabled={isRunning}>
+                Re-run analysis
+              </button>
+            </div>
+          )}
+        </>
+      )}
+
+      {status === 'failed' && !isRunning && (
+        <div className="output-actions" style={{ marginTop: '1rem' }}>
+          <button className="btn btn--primary" onClick={runStage}>
+            Retry
+          </button>
+        </div>
+      )}
+    </section>
+  )
+}
+
+// ── Project setup form ───────────────────────────────────────────────────────
+
+function ProjectSetup({ onCreate }) {
+  const [name, setName] = useState('')
+  const [intent, setIntent] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+
+  async function handleSubmit(e) {
+    e.preventDefault()
+    if (!intent.trim()) return
+    setError(null)
+    setLoading(true)
+    try {
+      const { project_id } = await api.createProject(name.trim() || 'Untitled board', intent.trim())
+      onCreate(project_id, intent.trim())
+    } catch (err) {
+      setError(`Could not create project: ${err.message}. Make sure the backend is running at localhost:8000.`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="setup-screen">
+      <header className="setup-header">
+        <div className="wordmark">
+          <span className="wordmark-trace" aria-hidden="true">⬡</span>
+          <span className="wordmark-text">Tracer</span>
+        </div>
+        <p className="setup-tagline">Describe your board. We'll build the spec.</p>
+      </header>
+
+      <form className="setup-form" onSubmit={handleSubmit} noValidate>
+        <div className="form-field">
+          <label className="form-label" htmlFor="project-name">
+            Project name <span className="form-optional">(optional)</span>
+          </label>
+          <input
+            id="project-name"
+            className="form-input"
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. Wireless sensor node rev A"
+            autoComplete="off"
+          />
+        </div>
+
+        <div className="form-field">
+          <label className="form-label" htmlFor="board-intent">
+            Describe your board
+          </label>
+          <p className="form-hint">
+            Write naturally — what it does, who uses it, any constraints you know about. The AI will
+            infer the rest and flag its assumptions for you to review.
+          </p>
+          <textarea
+            id="board-intent"
+            className="form-textarea"
+            value={intent}
+            onChange={(e) => setIntent(e.target.value)}
+            placeholder="e.g. A battery-powered environmental monitor that reads temperature, humidity, and CO₂, then sends readings over BLE every 30 seconds. It needs to run for at least a year on two AA batteries. The enclosure is outdoor-rated IP65."
+            rows={6}
+            required
+          />
+        </div>
+
+        {error && <ErrorBanner message={error} />}
+
+        <button
+          className="btn btn--primary btn--lg"
+          type="submit"
+          disabled={loading || !intent.trim()}
+        >
+          {loading ? <><Spinner /> Starting…</> : 'Describe your board →'}
+        </button>
+      </form>
+
+      <div className="setup-legend">
+        <div className="legend-item">
+          <ProvenanceTag provenance="user_stated" />
+          <span className="legend-desc">From your description</span>
+        </div>
+        <div className="legend-item">
+          <ProvenanceTag provenance="inferred" />
+          <span className="legend-desc">AI expert inference — review these</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Root App ─────────────────────────────────────────────────────────────────
+
+export default function App() {
+  const [projectId, setProjectId] = useState(null)
+  const [project, setProject] = useState(null)
+  const [activeStageKey, setActiveStageKey] = useState('intent_expansion')
+  const [loadError, setLoadError] = useState(null)
+  const [isMobile, setIsMobile] = useState(window.innerWidth < 700)
+
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 700px)')
+    const handler = (e) => setIsMobile(e.matches)
+    mq.addEventListener('change', handler)
+    return () => mq.removeEventListener('change', handler)
+  }, [])
+
+  const refreshProject = useCallback(async (id) => {
+    try {
+      const p = await api.getProject(id)
+      setProject(p)
+    } catch (err) {
+      setLoadError(err.message)
+    }
+  }, [])
+
+  function handleCreate(id) {
+    setProjectId(id)
+    setActiveStageKey('intent_expansion')
+    refreshProject(id)
+  }
+
+  function handleStageComplete(stageKey, result) {
+    // Merge the new stage into local project state without full refetch
+    setProject((prev) => {
+      if (!prev) return prev
+      const existing = prev.stages?.find((s) => s.stage_type === stageKey)
+      const newStage = {
+        id: result.stage_id ?? existing?.id,
+        stage_type: stageKey,
+        status: 'complete',
+        output_json: result.output ?? result,
+        error: null,
+      }
+      const stages = prev.stages
+        ? prev.stages.map((s) => (s.stage_type === stageKey ? newStage : s))
+        : [newStage]
+      if (!stages.find((s) => s.stage_type === stageKey)) stages.push(newStage)
+      return { ...prev, stages }
+    })
+  }
+
+  function handleRevise(stageKey, editedOutput) {
+    setProject((prev) => {
+      if (!prev) return prev
+      const stages = prev.stages?.map((s) =>
+        s.stage_type === stageKey ? { ...s, output_json: editedOutput } : s
+      )
+      return { ...prev, stages }
+    })
+  }
+
+  if (!projectId) {
+    return <ProjectSetup onCreate={handleCreate} />
+  }
+
+  if (!project) {
+    return (
+      <div className="loading-screen">
+        <Spinner />
+        <p>Loading project…</p>
+        {loadError && <ErrorBanner message={loadError} />}
+      </div>
+    )
+  }
+
+  const activeStageDef = STAGES.find((s) => s.key === activeStageKey)
+  const activeStageData = project.stages?.find((s) => s.stage_type === activeStageKey)
 
   return (
     <div className="app">
-      <header className="topbar">
-        <div className="brand-row">
-          <div className="brand-mark">T</div>
-          <div className="brand-wordmark">TRACER</div>
-          <div className="brand-chip">v0.4</div>
+      <header className="app-header">
+        <div className="wordmark">
+          <span className="wordmark-trace" aria-hidden="true">⬡</span>
+          <span className="wordmark-text">Tracer</span>
         </div>
-
-        <div className="topbar-divider" />
-
-        <div className="project-row">
-          <span className="project-label">PROJECT</span>
-          <span className="project-name">{projectName || 'new-project'}</span>
-          <span className="project-chip">REV A</span>
+        <div className="app-header-right">
+          <span className="project-name">{project.name ?? 'Untitled board'}</span>
+          <button
+            className="btn btn--ghost btn--sm"
+            onClick={() => {
+              setProjectId(null)
+              setProject(null)
+              setActiveStageKey('intent_expansion')
+            }}
+          >
+            New project
+          </button>
         </div>
-
-        <div className="status-pill">
-          <span className="status-dot" />
-          <span className="status-text">{statusText}</span>
-        </div>
-
-        <div className="spacer" />
-
-        {screen === 'requirements' && (
-          <>
-            <button className="btn btn-ghost" onClick={copyJson}>
-              {copied ? 'Copied ✓' : 'Export JSON'}
-            </button>
-            <button className="btn btn-primary" onClick={() => setFormalized(true)}>
-              Formalize spec →
-            </button>
-          </>
-        )}
       </header>
 
-      <div className="stage-strip">
-        {STAGE_DEFS.map((stageDef, index) => {
-          const isActive = index + 1 === stage
-          const isDone = index + 1 < stage
-          const isPending = index + 1 > stage
-          const isNavigable = Boolean(stageDef.screen) && screen !== 'analyzing'
-          return (
-            <div key={stageDef.num} className="stage-item">
-              <div
-                className={`stage-item-inner ${isNavigable ? 'stage-item-inner--clickable' : ''}`}
-                onClick={() => handleStageClick(stageDef.screen)}
-              >
-                <div
-                  className={`stage-dot ${isActive ? 'stage-dot--active' : ''} ${
-                    isDone ? 'stage-dot--done' : ''
-                  } ${isPending ? 'stage-dot--pending' : ''}`}
+      <div className="app-body">
+        <StageRail
+          stages={project.stages ?? []}
+          activeStageKey={activeStageKey}
+          onSelectStage={setActiveStageKey}
+          isMobile={isMobile}
+        />
+
+        <main className="main-panel" id="main-content">
+          <StagePanel
+            key={activeStageKey}
+            stageDef={activeStageDef}
+            stage={activeStageData}
+            projectId={projectId}
+            onStageComplete={handleStageComplete}
+            onRevise={handleRevise}
+          />
+
+          {/* next-stage nudge */}
+          {activeStageData?.status === 'complete' && (() => {
+            const idx = STAGES.findIndex((s) => s.key === activeStageKey)
+            const next = STAGES[idx + 1]
+            if (!next) return null
+            const nextStage = project.stages?.find((s) => s.stage_type === next.key)
+            if (nextStage?.status === 'complete') return null
+            return (
+              <div className="next-stage-nudge">
+                <span className="nudge-arrow" aria-hidden="true">↓</span>
+                <span>Ready for the next stage —</span>
+                <button
+                  className="nudge-link"
+                  onClick={() => setActiveStageKey(next.key)}
                 >
-                  {isDone ? '✓' : stageDef.num}
-                </div>
-                <div className="stage-labels">
-                  <span className="stage-pretitle">STAGE {stageDef.num}</span>
-                  <span className={`stage-title ${isActive ? 'stage-title--active' : ''}`}>
-                    {stageDef.label}
-                  </span>
-                </div>
+                  {next.label}
+                </button>
               </div>
-              {index < STAGE_DEFS.length - 1 && <span className="stage-separator">→</span>}
-            </div>
-          )
-        })}
+            )
+          })()}
+        </main>
       </div>
-
-      {screen === 'prompt' && (
-        <div className="prompt-screen">
-          <div className="prompt-inner">
-            <div className="prompt-eyebrow">STAGE 01 · DESCRIBE BOARD</div>
-            <h1 className="prompt-title">Describe your board</h1>
-            <p className="prompt-lede">
-              Write what the board needs to do in plain language — voltages, interfaces, size,
-              environment. Tracer extracts the stated requirements, infers the gaps, and formalizes
-              them into a spec you can review.
-            </p>
-
-            {analyzeError && (
-              <div className="analyze-error">
-                <span className="analyze-error-icon">!</span>
-                <span>
-                  Analysis failed: {analyzeError}
-                  {!analyzeError.includes('localhost') &&
-                    ' — Make sure the backend is running at localhost:8000.'}
-                </span>
-              </div>
-            )}
-
-            <div className="prompt-card">
-              <textarea
-                className="prompt-textarea"
-                value={brief}
-                onChange={(e) => setBrief(e.target.value)}
-                spellCheck={false}
-                placeholder="e.g. Small USB-C powered mux board. 9–36 V input, needs 5 V at 3 A out. Talks I²C to a host controller. Must fit a 50 × 35 mm enclosure and run up to 70 °C ambient."
-              />
-              <div className="prompt-card-footer">
-                <button type="button" className="prompt-attach">
-                  + Attach datasheet / netlist
-                </button>
-                <div className="spacer" />
-                <span className="prompt-count">{brief.length} chars</span>
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  onClick={handleAnalyze}
-                  disabled={!brief.trim()}
-                >
-                  Analyze requirements →
-                </button>
-              </div>
-            </div>
-
-            <div className="prompt-section">
-              <div className="prompt-section-label">TRY A STARTER</div>
-              <div className="starter-row">
-                {STARTER_OPTIONS.map((option) => (
-                  <button
-                    key={option.key}
-                    type="button"
-                    className="starter-chip"
-                    onClick={() => setBrief(STARTERS[option.key])}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="prompt-section prompt-section--extract">
-              <div className="prompt-section-label">TRACER WILL EXTRACT</div>
-              <div className="extract-row">
-                {EXTRACT_TAGS.map((tag) => (
-                  <span key={tag} className="extract-tag">
-                    {tag}
-                  </span>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {screen === 'analyzing' && (
-        <div className="analyzing-screen">
-          <div className="analyzing-spinner" />
-          <div className="analyzing-text">
-            <div className="analyzing-title">Analyzing intent…</div>
-            <div className="analyzing-sub">Extracting requirements from your description</div>
-          </div>
-          <div className="analyzing-steps">
-            {ANALYZING_STEPS.map((label, index) => {
-              const isDone = index < completedSteps
-              return (
-                <div key={label} className={`analyzing-step ${isDone ? 'analyzing-step--done' : ''}`}>
-                  <div
-                    className={`analyzing-step-dot ${isDone ? 'analyzing-step-dot--done' : ''}`}
-                    style={{ animationDelay: `${index * 0.2}s` }}
-                  />
-                  <span className="analyzing-step-label">{label}</span>
-                  {isDone && <span className="analyzing-step-check">✓</span>}
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
-
-      {screen === 'requirements' && (
-        <div className="layout">
-          <aside className="rail-left">
-            <div className="input-label-row">
-              <span className="input-badge">INPUT</span>
-              <span className="input-caption">plain language</span>
-            </div>
-            <div className="input-box">{brief}</div>
-
-            <div className="divider" />
-
-            <div className="section-label">INTENT ANALYSIS</div>
-            <div className="stat-list">
-              <div className="stat-row">
-                <span>Requirements extracted</span>
-                <span className="stat-value">{total}</span>
-              </div>
-              <div className="stat-row">
-                <span>Stated</span>
-                <span className="stat-value stat-value--green">{statedCount}</span>
-              </div>
-              <div className="stat-row">
-                <span>Inferred</span>
-                <span className="stat-value stat-value--amber">{inferredCount}</span>
-              </div>
-            </div>
-
-            <div className="confidence-block">
-              <div className="confidence-label-row">
-                <span>OVERALL CONFIDENCE</span>
-                <span>{overallPct}</span>
-              </div>
-              <div className="confidence-track">
-                <div className="confidence-fill" style={overallBar} />
-              </div>
-            </div>
-
-            <div className="divider" />
-
-            <div className="section-label section-label--bottom">
-              <span>INFERRED ASSUMPTIONS</span>
-              <span>{inferredCount}</span>
-            </div>
-            <div className="assumptions-list">
-              {inferredAssumptions.map((req) => (
-                <div key={req.id} className="assumption-row">
-                  <div className="assumption-dot" />
-                  <div>
-                    <span className="assumption-text">{req.title}</span>
-                    <span className="assumption-tag">→ {req.id}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </aside>
-
-          <main className="main-content">
-            <div className="content-header">
-              <div>
-                <div className="content-title">Structured requirements</div>
-                <div className="content-subtitle">{summarySub}</div>
-              </div>
-              <div className="filter-row">
-                {activeFilters.map((item) => (
-                  <button
-                    key={item.key}
-                    type="button"
-                    className={`chip ${filter === item.key ? 'chip--active' : ''}`}
-                    onClick={() => setFilter(item.key)}
-                  >
-                    {item.text}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="chip-bar">
-              {categoryChips.map((item) => (
-                <button
-                  key={item.key}
-                  type="button"
-                  className={`chip ${category === item.key ? 'chip--active' : ''}`}
-                  onClick={() => setCategory(item.key)}
-                >
-                  {item.text}
-                </button>
-              ))}
-            </div>
-
-            <div className="groups-column">
-              {groups.map((group) => (
-                <section key={group.label} className="group-section">
-                  <div className="group-header">
-                    <span className="group-title">{group.label}</span>
-                    <span className="group-count">{group.count}</span>
-                    <div className="group-spacer" />
-                  </div>
-                  <div className="group-items">
-                    {group.items.map((req) => {
-                      const isStated = req.kind === 'stated'
-                      const stripColor = isStated ? '#9bbf9f' : '#d3ccbf'
-                      const badgeBg = isStated ? '#e7efe7' : '#fbeed8'
-                      const badgeColor = isStated ? '#3f6b50' : '#9a4d09'
-                      const badgeBorder = isStated ? '#cfe0d2' : '#f0dcb5'
-                      return (
-                        <div key={req.id} className="req-card">
-                          <div className="req-strip" style={{ background: stripColor }} />
-                          <div className="req-body">
-                            <div className="req-top-row">
-                              <span className="req-id">{req.id}</span>
-                              <button
-                                type="button"
-                                className="req-badge"
-                                onClick={() => handleToggleKind(req.id)}
-                                style={{
-                                  background: badgeBg,
-                                  color: badgeColor,
-                                  borderColor: badgeBorder,
-                                }}
-                              >
-                                {isStated ? 'STATED' : 'INFERRED'}
-                              </button>
-                              <div className="req-spacer" />
-                              <div className="req-confidence">
-                                <span className="req-conf-label">CONF</span>
-                                <div className="req-conf-track">
-                                  <div className="req-conf-fill" style={getBarStyle(req.conf)} />
-                                </div>
-                                <span className="req-conf-text">
-                                  {Math.round(req.conf * 100)}%
-                                </span>
-                              </div>
-                            </div>
-                            <div className="req-title">{req.title}</div>
-                            <input
-                              className="req-input"
-                              value={req.value}
-                              onChange={(e) => handleValueChange(req.id, e.target.value)}
-                            />
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                </section>
-              ))}
-            </div>
-          </main>
-
-          <aside className="rail-right">
-            <div className="spec-header">
-              <span className="spec-label">FORMAL SPECIFICATION</span>
-              <span className="spec-tab">JSON</span>
-            </div>
-            <div className="spec-panel">
-              <div className="spec-panel-header">
-                <div className="spec-dot" />
-                <span className="spec-filename">{projectName || 'project'}.req.json</span>
-                <div className="req-spacer" />
-                <button type="button" className="spec-copy" onClick={copyJson}>
-                  {copied ? 'copied ✓' : 'copy'}
-                </button>
-              </div>
-              <pre className="spec-pre">{jsonText}</pre>
-            </div>
-            <div className="spec-footer">
-              <div className="footer-dot" />
-              <span className="footer-note">{footerNote}</span>
-            </div>
-          </aside>
-        </div>
-      )}
     </div>
   )
 }
