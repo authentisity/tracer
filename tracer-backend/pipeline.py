@@ -35,6 +35,7 @@ class _FormalReq(BaseModel):
     category: str
     statement: str
     provenance: str      # user_stated | inferred
+    confidence: float    # 0.0 – 1.0
     parameter: Optional[str] = None
     operator: Optional[str] = None   # <= >= == < > in
     value: Optional[str] = None      # str covers both numeric and enumerated values
@@ -103,7 +104,10 @@ def run_formal_requirements(intent: str, intent_expansion: dict, structured_bull
         "Where a requirement is quantifiable, add parameter, operator, value (as a string), and unit. "
         "Valid operators: <=, >=, ==, <, >, in. "
         "Add a verification_method (simulation / measurement / inspection / analysis / test) "
-        "for every requirement.\n\n"
+        "for every requirement. "
+        "Assign a confidence score (0.0–1.0) to each requirement: "
+        "use 0.90–0.99 for requirements explicitly stated in the description, "
+        "and 0.50–0.85 for inferred requirements based on engineering judgement.\n\n"
         f"Original description:\n{intent}\n\n"
         f"Goal: {intent_expansion['restated_goal']}\n\n"
         f"Requirement bullets:\n{bullets_text}"

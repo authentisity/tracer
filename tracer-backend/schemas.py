@@ -27,6 +27,7 @@ class FormalRequirement(BaseModel):
     category: str
     statement: str
     provenance: str
+    confidence: Optional[float] = None
     parameter: Optional[str] = None
     operator: Optional[str] = None
     value: Optional[Union[float, str]] = None
