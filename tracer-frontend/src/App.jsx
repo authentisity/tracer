@@ -187,6 +187,15 @@ export default function App() {
     if (STARTERS[key]) setBrief(STARTERS[key])
   }
 
+  const handleNewBoard = () => {
+    clearTimeout(analyzeRef.current)
+    setBrief('')
+    setFormalized(false)
+    setFilter('all')
+    setCategory('all')
+    setScreen('prompt')
+  }
+
   const total = requirements.length
   const statedCount = requirements.filter((r) => r.kind === 'stated').length
   const inferredCount = total - statedCount
@@ -429,6 +438,9 @@ export default function App() {
             <span className="input-caption">plain language</span>
           </div>
           <div className="input-box">{brief}</div>
+          <button type="button" className="new-board-btn" onClick={handleNewBoard}>
+            + Describe a new board
+          </button>
 
           <div className="divider" />
 

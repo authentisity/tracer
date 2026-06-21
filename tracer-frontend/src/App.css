@@ -436,6 +436,29 @@ textarea:focus-visible {
   color: var(--text-alt);
 }
 
+.new-board-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 9px;
+  width: 100%;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  background: #fff;
+  border: 1px dashed #cfc8bb;
+  border-radius: 7px;
+  padding: 7px 11px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.new-board-btn:hover {
+  border-color: #9a4d09;
+  color: #9a4d09;
+}
+
 .divider {
   height: 1px;
   background: var(--border-muted);
@@ -579,6 +602,7 @@ textarea:focus-visible {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  margin-bottom: 20px;
 }
 
 .chip {
