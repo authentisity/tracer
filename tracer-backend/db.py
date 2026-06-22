@@ -1,10 +1,12 @@
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-DB_PATH = Path(__file__).parent / 'tracer.db'
+_DEFAULT_DB_PATH = "/tmp/tracer.db" if os.environ.get("VERCEL") else str(Path(__file__).parent / "tracer.db")
+DB_PATH = Path(os.environ.get("TRACER_DB_PATH", _DEFAULT_DB_PATH))
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (

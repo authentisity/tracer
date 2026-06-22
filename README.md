@@ -112,6 +112,30 @@ http://127.0.0.1:5173
 If Vite starts on another port, such as `5174`, use the URL printed in the
 terminal. The backend allows both `5173` and `5174` for local development.
 
+## Vercel Deployment
+
+This repo includes `vercel.json` and `api/index.py` so Vercel can deploy the
+Vite frontend and expose the FastAPI backend through `/api`.
+
+In Vercel:
+
+1. Import the GitHub repository.
+2. Keep the project root as the repository root.
+3. Add the environment variable `GOOGLE_API_KEY`.
+4. Deploy.
+
+The checked-in `vercel.json` sets:
+
+- install command: `cd tracer-frontend && npm install`
+- build command: `cd tracer-frontend && npm run build`
+- output directory: `tracer-frontend/dist`
+- API entrypoint: `api/index.py`
+
+On Vercel, the SQLite database is written to `/tmp/tracer.db` so the serverless
+function can write during a demo. That storage is not durable. For a production
+deployment, replace SQLite with a hosted database such as Postgres, Supabase, or
+Neon.
+
 ## Demo Flow
 
 1. Create a project with a plain-English board description.
